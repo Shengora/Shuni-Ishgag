@@ -3651,14 +3651,17 @@ export function createBot() {
     }
   });
 
-  // ── Operator hisobini ulashish ─────────────────────────────────────────────
-  // sharedWith is stored on every slot row; always read from slot 1 as canonical.
+  // ── Operator hisobini ulashish (per-slot, multi-admin) ───────────────────
+  // Each slot has its own independent sharedWith list.
+  // One slot can be shared with multiple admins simultaneously.
+
+  // Step 1: show all slots with their current admin list
   bot.callbackQuery("master_share_list", async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
     const operatorId = ctx.from.id;
 
     const ownRows = await db
-      .select({ sharedWith: masterSessions.sharedWith })
+      .select()
       .from(masterSessions)
       .where(eq(masterSessions.operatorId, operatorId))
       .orderBy(asc(masterSessions.slot));
@@ -3668,8 +3671,59 @@ export function createBot() {
       return;
     }
 
-    // Canonical shared list — read from the first slot row
-    const shared: number[] = ownRows[0].sharedWith ? JSON.parse(ownRows[0].sharedWith) : [];
+    const adminRows = await db
+      .select({ telegramUserId: admins.telegramUserId, firstName: admins.firstName, username: admins.username })
+      .from(admins)
+      .where(eq(admins.isBlocked, false));
+    const adminMap = new Map(adminRows.map(r => [r.telegramUserId, r]));
+
+    const lines: string[] = [];
+    const kb = new InlineKeyboard();
+
+    for (const row of ownRows) {
+      const shared: number[] = (() => {
+        if (!row.sharedWith) return [];
+        try { return JSON.parse(row.sharedWith) as number[]; } catch { return []; }
+      })();
+      const names = shared
+        .map(id => { const a = adminMap.get(id); return a ? (a.username ? `@${a.username}` : a.firstName ?? String(id)) : String(id); })
+        .join(", ");
+      lines.push(
+        shared.length
+          ? `${E.OK} Slot ${row.slot} (<code>${row.phone}</code>): ${names}`
+          : `${E.NO} Slot ${row.slot} (<code>${row.phone}</code>): ulashilmagan`,
+      );
+      kb.text(`Slot ${row.slot} boshqarish`, `master_share_slot:${row.slot}`).icon(EID.SHARE).primary().row();
+    }
+    kb.text("Orqaga", "menu_login").icon(EID.KEY).primary();
+
+    await ctx.reply(
+      `${E.SHARE} <b>Slot ulashish</b>\n\nHar slotga bir nechta admin ulashish mumkin:\n\n${lines.join("\n")}`,
+      { parse_mode: "HTML", reply_markup: kb },
+    );
+  });
+
+  // Step 2: toggle admins for a specific slot
+  bot.callbackQuery(/^master_share_slot:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery().catch(() => {});
+    const operatorId = ctx.from.id;
+    const slot = Number(ctx.match[1]);
+
+    const [slotRow] = await db
+      .select()
+      .from(masterSessions)
+      .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, slot)))
+      .limit(1);
+
+    if (!slotRow) {
+      await ctx.answerCallbackQuery({ text: "❌ Slot topilmadi.", show_alert: true });
+      return;
+    }
+
+    const shared: number[] = (() => {
+      if (!slotRow.sharedWith) return [];
+      try { return JSON.parse(slotRow.sharedWith) as number[]; } catch { return []; }
+    })();
 
     const adminRows = await db
       .select({ telegramUserId: admins.telegramUserId, firstName: admins.firstName, username: admins.username })
@@ -3678,56 +3732,68 @@ export function createBot() {
 
     const others = adminRows.filter(r => r.telegramUserId !== operatorId);
     if (!others.length) {
-      await ctx.reply(`${E.INFO} Boshqa admin yo\'q.`, { parse_mode: "HTML", reply_markup: menuButton() });
+      await ctx.reply(`${E.INFO} Boshqa admin yo'q.`, { parse_mode: "HTML", reply_markup: menuButton() });
       return;
     }
 
     const kb = new InlineKeyboard();
     for (const r of others) {
       const name = r.username ? `@${r.username}` : r.firstName ?? String(r.telegramUserId);
-      const isShared = shared.includes(r.telegramUserId);
-      kb.text(name, `master_share_do:${r.telegramUserId}`)
-        .icon(isShared ? EID.OK : EID.ADD)
-        [isShared ? "success" : "primary"]().row();
+      const isOn = shared.includes(r.telegramUserId);
+      kb.text(isOn ? `${name} ✅` : name, `master_share_slot_do:${slot}:${r.telegramUserId}`)
+        .icon(isOn ? EID.OK : EID.ADD)
+        [isOn ? "success" : "primary"]().row();
     }
-    kb.text("Orqaga", "menu_login").icon(EID.KEY).primary();
+    kb.text("Orqaga", "master_share_list").icon(EID.SHARE).primary();
 
-    await ctx.reply(
-      `${E.SHARE} <b>Operator hisobini ulashish</b>\n\n${E.OK} = ulashilgan (bosib olib tashlaysiz)\n${E.ADD} = ulash`,
+    const sharedNames = shared
+      .map(id => { const a = adminRows.find(r => r.telegramUserId === id); return a ? (a.username ? `@${a.username}` : a.firstName ?? String(id)) : String(id); })
+      .join(", ");
+
+    await ctx.editMessageText(
+      `${E.SHARE} <b>Slot ${slot}: <code>${slotRow.phone}</code></b>\n\n` +
+      (shared.length ? `Hozirgi: ${sharedNames}\n\n` : `Hali ulashilmagan\n\n`) +
+      `Qo'shish yoki olib tashlash uchun tanlang:`,
       { parse_mode: "HTML", reply_markup: kb },
     );
   });
 
-  bot.callbackQuery(/^master_share_do:(\d+)$/, async (ctx) => {
+  // Step 3: toggle one admin on this slot only
+  bot.callbackQuery(/^master_share_slot_do:(\d+):(\d+)$/, async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
     const operatorId = ctx.from.id;
-    const targetId   = Number(ctx.match[1]);
+    const slot     = Number(ctx.match[1]);
+    const targetId = Number(ctx.match[2]);
 
-    const ownRows = await db
-      .select({ sharedWith: masterSessions.sharedWith })
+    const [slotRow] = await db
+      .select()
       .from(masterSessions)
-      .where(eq(masterSessions.operatorId, operatorId))
-      .orderBy(asc(masterSessions.slot));
+      .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, slot)))
+      .limit(1);
 
-    if (!ownRows.length) {
-      await ctx.answerCallbackQuery({ text: "❌ Login topilmadi.", show_alert: true });
+    if (!slotRow) {
+      await ctx.answerCallbackQuery({ text: "❌ Slot topilmadi.", show_alert: true });
       return;
     }
 
-    let shared: number[] = ownRows[0].sharedWith ? JSON.parse(ownRows[0].sharedWith) : [];
-    const wasShared = shared.includes(targetId);
-    shared = wasShared ? shared.filter(id => id !== targetId) : [...shared, targetId];
+    let shared: number[] = (() => {
+      if (!slotRow.sharedWith) return [];
+      try { return JSON.parse(slotRow.sharedWith) as number[]; } catch { return []; }
+    })();
 
-    // Update sharedWith on ALL slots so any slot can be used by the shared admin
+    const wasOn = shared.includes(targetId);
+    shared = wasOn ? shared.filter(id => id !== targetId) : [...shared, targetId];
+
+    // Update ONLY this slot's sharedWith
     await db
       .update(masterSessions)
       .set({ sharedWith: shared.length ? JSON.stringify(shared) : null })
-      .where(eq(masterSessions.operatorId, operatorId));
+      .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, slot)));
 
-    // Evict cached client for the target so they pick up (or lose) the shared session
+    // Evict cached client so target immediately picks up (or loses) the session
     await removeMasterSession(targetId).catch(() => {});
 
-    // Refresh the list in place
+    // Refresh the admin toggle list in place
     const adminRows = await db
       .select({ telegramUserId: admins.telegramUserId, firstName: admins.firstName, username: admins.username })
       .from(admins)
@@ -3737,15 +3803,24 @@ export function createBot() {
     const kb = new InlineKeyboard();
     for (const r of others) {
       const name = r.username ? `@${r.username}` : r.firstName ?? String(r.telegramUserId);
-      const isNow = shared.includes(r.telegramUserId);
-      kb.text(name, `master_share_do:${r.telegramUserId}`)
-        .icon(isNow ? EID.OK : EID.ADD)
-        [isNow ? "success" : "primary"]().row();
+      const isOn = shared.includes(r.telegramUserId);
+      kb.text(isOn ? `${name} ✅` : name, `master_share_slot_do:${slot}:${r.telegramUserId}`)
+        .icon(isOn ? EID.OK : EID.ADD)
+        [isOn ? "success" : "primary"]().row();
     }
-    kb.text("Orqaga", "menu_login").icon(EID.KEY).primary();
+    kb.text("Orqaga", "master_share_list").icon(EID.SHARE).primary();
+
+    const tAdmin = adminRows.find(r => r.telegramUserId === targetId);
+    const tName  = tAdmin ? (tAdmin.username ? `@${tAdmin.username}` : tAdmin.firstName ?? String(targetId)) : String(targetId);
+    const sharedNames = shared
+      .map(id => { const a = adminRows.find(r => r.telegramUserId === id); return a ? (a.username ? `@${a.username}` : a.firstName ?? String(id)) : String(id); })
+      .join(", ");
 
     await ctx.editMessageText(
-      `${E.SHARE} <b>Operator hisobini ulashish</b>\n\n${wasShared ? `${E.UNLOCK} Ulashish bekor qilindi.` : `${E.LINK} Ulashildi!`}\n\n${E.OK} = ulashilgan | ${E.ADD} = ulash`,
+      `${E.SHARE} <b>Slot ${slot}</b>\n\n` +
+      (wasOn ? `${E.UNLOCK} ${tName} olib tashlandi.` : `${E.LINK} ${tName} qo'shildi.`) +
+      (sharedNames ? `\n\nHozirgi: ${sharedNames}` : `\n\nHali ulashilmagan`) +
+      `\n\nQo'shish yoki olib tashlash uchun tanlang:`,
       { parse_mode: "HTML", reply_markup: kb },
     );
   });
