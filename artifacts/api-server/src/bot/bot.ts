@@ -3651,14 +3651,16 @@ export function createBot() {
     }
   });
 
-  // ── Operator hisobini ulashish ─────────────────────────────────────────────
-  // sharedWith is stored on every slot row; always read from slot 1 as canonical.
+  // ── Per-slot sharing ─────────────────────────────────────────────────────
+  // Each slot is assignable to exactly ONE operator. sharedWith on each row
+  // stores [operatorId] (at most 1 element). Different slots can be assigned
+  // to different operators.
   bot.callbackQuery("master_share_list", async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
     const operatorId = ctx.from.id;
 
     const ownRows = await db
-      .select({ sharedWith: masterSessions.sharedWith })
+      .select()
       .from(masterSessions)
       .where(eq(masterSessions.operatorId, operatorId))
       .orderBy(asc(masterSessions.slot));
@@ -3668,8 +3670,72 @@ export function createBot() {
       return;
     }
 
-    // Canonical shared list — read from the first slot row
-    const shared: number[] = ownRows[0].sharedWith ? JSON.parse(ownRows[0].sharedWith) : [];
+    const adminRows = await db
+      .select({ telegramUserId: admins.telegramUserId, firstName: admins.firstName, username: admins.username })
+      .from(admins)
+      .where(eq(admins.isBlocked, false));
+    const adminMap = new Map(adminRows.map(r => [r.telegramUserId, r]));
+
+    const kb = new InlineKeyboard();
+    const lines: string[] = [];
+    for (const row of ownRows) {
+      const assignedId: number | null = (() => {
+        if (!row.sharedWith) return null;
+        try { const ids: number[] = JSON.parse(row.sharedWith); return ids[0] ?? null; }
+        catch { return null; }
+      })();
+      const aAdmin = assignedId ? adminMap.get(assignedId) : null;
+      const aName  = aAdmin ? (aAdmin.username ? `@${aAdmin.username}` : aAdmin.firstName ?? String(assignedId)) : null;
+      if (aName) {
+        lines.push(`${E.OK} Slot ${row.slot} (<code>${row.phone}</code>) → ${aName}`);
+        kb.text(`Slot ${row.slot}: ${aName} (bekor qilish)`, `master_share_slot:${row.slot}`).icon(EID.UNLOCK).danger().row();
+      } else {
+        lines.push(`${E.NO} Slot ${row.slot} (<code>${row.phone}</code>) → ulashilmagan`);
+        kb.text(`Slot ${row.slot}: Operator biriktirish`, `master_share_slot:${row.slot}`).icon(EID.ADD).success().row();
+      }
+    }
+    kb.text("Orqaga", "menu_login").icon(EID.KEY).primary();
+
+    await ctx.reply(
+      `${E.SHARE} <b>Slot ulashish</b>\n\nHar bir slotga bitta operator biriktiriladi:\n\n${lines.join("\n")}`,
+      { parse_mode: "HTML", reply_markup: kb },
+    );
+  });
+
+  // ── master_share_slot:{slot} — pick operator for this specific slot ───────
+  bot.callbackQuery(/^master_share_slot:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery().catch(() => {});
+    const operatorId = ctx.from.id;
+    const slot = Number(ctx.match[1]);
+
+    const [slotRow] = await db
+      .select()
+      .from(masterSessions)
+      .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, slot)))
+      .limit(1);
+
+    if (!slotRow) {
+      await ctx.answerCallbackQuery({ text: "❌ Slot topilmadi.", show_alert: true });
+      return;
+    }
+
+    const currentId: number | null = (() => {
+      if (!slotRow.sharedWith) return null;
+      try { const ids: number[] = JSON.parse(slotRow.sharedWith); return ids[0] ?? null; }
+      catch { return null; }
+    })();
+
+    // Map: operatorId → slot number, for all slots of this SA
+    const allOwnRows = await db
+      .select()
+      .from(masterSessions)
+      .where(eq(masterSessions.operatorId, operatorId));
+    const alreadyAssigned = new Map<number, number>();
+    for (const r of allOwnRows) {
+      if (!r.sharedWith) continue;
+      try { const ids: number[] = JSON.parse(r.sharedWith); if (ids[0]) alreadyAssigned.set(ids[0], r.slot); }
+      catch { /* ignore */ }
+    }
 
     const adminRows = await db
       .select({ telegramUserId: admins.telegramUserId, firstName: admins.firstName, username: admins.username })
@@ -3678,79 +3744,144 @@ export function createBot() {
 
     const others = adminRows.filter(r => r.telegramUserId !== operatorId);
     if (!others.length) {
-      await ctx.reply(`${E.INFO} Boshqa admin yo'q.`, { parse_mode: "HTML", reply_markup: menuButton() });
+      await ctx.reply(`${E.INFO} Boshqa admin yo\'q.`, { parse_mode: "HTML", reply_markup: menuButton() });
       return;
     }
 
     const kb = new InlineKeyboard();
     for (const r of others) {
       const name = r.username ? `@${r.username}` : r.firstName ?? String(r.telegramUserId);
-      const isShared = shared.includes(r.telegramUserId);
-      kb.text(name, `master_share_do:${r.telegramUserId}`)
-        .icon(isShared ? EID.OK : EID.ADD)
-        [isShared ? "success" : "primary"]().row();
+      const isCurrent = r.telegramUserId === currentId;
+      const otherSlot = alreadyAssigned.get(r.telegramUserId);
+      const label = isCurrent
+        ? `${name} (bekor qilish)`
+        : otherSlot ? `${name} (Slot ${otherSlot} dan ko\'chirish)` : name;
+      kb.text(label, `master_share_slot_do:${slot}:${r.telegramUserId}`)
+        .icon(isCurrent ? EID.UNLOCK : EID.ADD)
+        [isCurrent ? "danger" : "primary"]().row();
     }
-    kb.text("Orqaga", "menu_login").icon(EID.KEY).primary();
+    kb.text("Orqaga", "master_share_list").icon(EID.SHARE).primary();
 
-    await ctx.reply(
-      `${E.SHARE} <b>Operator hisobini ulashish</b>\n\n${E.OK} = ulashilgan (bosib olib tashlaysiz)\n${E.ADD} = ulash`,
+    const curAdmin = currentId ? adminRows.find(r => r.telegramUserId === currentId) : null;
+    const curName  = curAdmin ? (curAdmin.username ? `@${curAdmin.username}` : curAdmin.firstName ?? String(currentId)) : null;
+
+    await ctx.editMessageText(
+      `${E.SHARE} <b>Slot ${slot}: <code>${slotRow.phone}</code></b>\n\n` +
+      (curName
+        ? `Hozir: ${E.OK} ${curName}\n\nO\'zgartirish yoki bekor qilish uchun tanlang:`
+        : `Hozir: ulashilmagan\n\nKimga biriktirish?`),
       { parse_mode: "HTML", reply_markup: kb },
     );
   });
 
-  bot.callbackQuery(/^master_share_do:(\d+)$/, async (ctx) => {
+  // ── master_share_slot_do:{slot}:{targetId} — assign/unassign one slot ─────
+  bot.callbackQuery(/^master_share_slot_do:(\d+):(\d+)$/, async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
     const operatorId = ctx.from.id;
-    const targetId   = Number(ctx.match[1]);
+    const slot       = Number(ctx.match[1]);
+    const targetId   = Number(ctx.match[2]);
 
-    const ownRows = await db
-      .select({ sharedWith: masterSessions.sharedWith })
+    const allOwnRows = await db
+      .select()
       .from(masterSessions)
       .where(eq(masterSessions.operatorId, operatorId))
       .orderBy(asc(masterSessions.slot));
 
-    if (!ownRows.length) {
+    if (!allOwnRows.length) {
       await ctx.answerCallbackQuery({ text: "❌ Login topilmadi.", show_alert: true });
       return;
     }
 
-    let shared: number[] = ownRows[0].sharedWith ? JSON.parse(ownRows[0].sharedWith) : [];
-    const wasShared = shared.includes(targetId);
-    shared = wasShared ? shared.filter(id => id !== targetId) : [...shared, targetId];
+    const slotRow = allOwnRows.find(r => r.slot === slot);
+    if (!slotRow) {
+      await ctx.answerCallbackQuery({ text: "❌ Slot topilmadi.", show_alert: true });
+      return;
+    }
 
-    // Update sharedWith on ALL slots so any slot can be used by the shared admin
+    const currentId: number | null = (() => {
+      if (!slotRow.sharedWith) return null;
+      try { const ids: number[] = JSON.parse(slotRow.sharedWith); return ids[0] ?? null; }
+      catch { return null; }
+    })();
+    const wasAssigned = currentId === targetId;
+
+    // Clear this slot
     await db
       .update(masterSessions)
-      .set({ sharedWith: shared.length ? JSON.stringify(shared) : null })
-      .where(eq(masterSessions.operatorId, operatorId));
+      .set({ sharedWith: null })
+      .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, slot)));
 
-    // Evict cached client for the target so they pick up (or lose) the shared session
+    if (!wasAssigned) {
+      // Remove target from any other slot of this SA (each operator gets only 1 slot)
+      for (const r of allOwnRows) {
+        if (r.slot === slot || !r.sharedWith) continue;
+        try {
+          const ids: number[] = JSON.parse(r.sharedWith);
+          if (ids.includes(targetId)) {
+            await db
+              .update(masterSessions)
+              .set({ sharedWith: null })
+              .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, r.slot)));
+          }
+        } catch { /* ignore */ }
+      }
+      // Assign this slot to the target
+      await db
+        .update(masterSessions)
+        .set({ sharedWith: JSON.stringify([targetId]) })
+        .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, slot)));
+    }
+
+    // Evict cached client so target picks up (or loses) the session immediately
     await removeMasterSession(targetId).catch(() => {});
 
-    // Refresh the list in place
+    // Refresh slot list display
+    const updatedRows = await db
+      .select()
+      .from(masterSessions)
+      .where(eq(masterSessions.operatorId, operatorId))
+      .orderBy(asc(masterSessions.slot));
+
     const adminRows = await db
       .select({ telegramUserId: admins.telegramUserId, firstName: admins.firstName, username: admins.username })
       .from(admins)
       .where(eq(admins.isBlocked, false));
+    const adminMap = new Map(adminRows.map(r => [r.telegramUserId, r]));
 
-    const others = adminRows.filter(r => r.telegramUserId !== operatorId);
     const kb = new InlineKeyboard();
-    for (const r of others) {
-      const name = r.username ? `@${r.username}` : r.firstName ?? String(r.telegramUserId);
-      const isNow = shared.includes(r.telegramUserId);
-      kb.text(name, `master_share_do:${r.telegramUserId}`)
-        .icon(isNow ? EID.OK : EID.ADD)
-        [isNow ? "success" : "primary"]().row();
+    const lines: string[] = [];
+    for (const row of updatedRows) {
+      const assignedId: number | null = (() => {
+        if (!row.sharedWith) return null;
+        try { const ids: number[] = JSON.parse(row.sharedWith); return ids[0] ?? null; }
+        catch { return null; }
+      })();
+      const aAdmin = assignedId ? adminMap.get(assignedId) : null;
+      const aName  = aAdmin ? (aAdmin.username ? `@${aAdmin.username}` : aAdmin.firstName ?? String(assignedId)) : null;
+      if (aName) {
+        lines.push(`${E.OK} Slot ${row.slot} (<code>${row.phone}</code>) → ${aName}`);
+        kb.text(`Slot ${row.slot}: ${aName} (bekor qilish)`, `master_share_slot:${row.slot}`).icon(EID.UNLOCK).danger().row();
+      } else {
+        lines.push(`${E.NO} Slot ${row.slot} (<code>${row.phone}</code>) → ulashilmagan`);
+        kb.text(`Slot ${row.slot}: Operator biriktirish`, `master_share_slot:${row.slot}`).icon(EID.ADD).success().row();
+      }
     }
     kb.text("Orqaga", "menu_login").icon(EID.KEY).primary();
 
+    const tAdmin = adminMap.get(targetId);
+    const tName  = tAdmin ? (tAdmin.username ? `@${tAdmin.username}` : tAdmin.firstName ?? String(targetId)) : String(targetId);
+
     await ctx.editMessageText(
-      `${E.SHARE} <b>Operator hisobini ulashish</b>\n\n${wasShared ? `${E.UNLOCK} Ulashish bekor qilindi.` : `${E.LINK} Ulashildi!`}\n\n${E.OK} = ulashilgan | ${E.ADD} = ulash`,
+      `${E.SHARE} <b>Slot ulashish</b>\n\n` +
+      (wasAssigned
+        ? `${E.UNLOCK} Slot ${slot} — ${tName} dan bekor qilindi.`
+        : `${E.LINK} Slot ${slot} — ${tName} ga biriktirildi.`) +
+      `\n\n${lines.join("\n")}`,
       { parse_mode: "HTML", reply_markup: kb },
     );
   });
 
-  // Text handler for awaitingVerifierInput
+    // Text handler for awaitingVerifierInput
   bot.on("message:text", async (ctx, next) => {
     if (!ctx.from) return next();
 
