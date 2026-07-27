@@ -3812,20 +3812,7 @@ export function createBot() {
       .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, slot)));
 
     if (!wasAssigned) {
-      // Remove target from any other slot of this SA (each operator gets only 1 slot)
-      for (const r of allOwnRows) {
-        if (r.slot === slot || !r.sharedWith) continue;
-        try {
-          const ids: number[] = JSON.parse(r.sharedWith);
-          if (ids.includes(targetId)) {
-            await db
-              .update(masterSessions)
-              .set({ sharedWith: null })
-              .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, r.slot)));
-          }
-        } catch { /* ignore */ }
-      }
-      // Assign this slot to the target
+      // Assign this slot to the target (independent — other slots are not affected)
       await db
         .update(masterSessions)
         .set({ sharedWith: JSON.stringify([targetId]) })
