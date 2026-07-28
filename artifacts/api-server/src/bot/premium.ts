@@ -628,7 +628,7 @@ export async function pollPremiumActiveViaStart(
 export async function getInvoiceFromPremiumBot(
   client: TelegramClient,
   botUsername: string,
-): Promise<any | null> {
+): Promise<{ invoice: any | null; firstMsgText: string | null }> {
   try {
     // Listen for any message from the bot (invoice or regular)
     const msgPromise = waitForBotMsg(client, botUsername, () => true, 30000);
@@ -636,19 +636,21 @@ export async function getInvoiceFromPremiumBot(
 
     const msg = await msgPromise;
     if (!msg) {
+      // Pure timeout — bot never responded at all
       logger.warn({ botUsername }, "No response from PremiumBot after /start");
-      return null;
+      return { invoice: null, firstMsgText: null };
     }
 
     // Check if the message itself is an invoice
     const mediaType = msg.media?.className ?? "";
     if (mediaType === "MessageMediaInvoice") {
       logger.info({ botUsername, title: msg.media?.title }, "Received invoice message from PremiumBot");
-      return msg;
+      return { invoice: msg, firstMsgText: null };
     }
 
-    // Not an invoice yet — maybe there's a follow-up invoice after a welcome message
-    logger.info({ botUsername, mediaType, text: (msg.text ?? "").slice(0, 80) }, "First message is not invoice — waiting for invoice");
+    // Not an invoice — capture text (may be "already active" or a welcome/loading msg)
+    const firstMsgText: string = (msg.text ?? msg.message ?? "").trim();
+    logger.info({ botUsername, mediaType, text: firstMsgText.slice(0, 120) }, "First message is not invoice — waiting for follow-up invoice");
 
     const invoiceMsg = await waitForBotMsg(
       client,
@@ -657,14 +659,14 @@ export async function getInvoiceFromPremiumBot(
       20000,
     );
     if (!invoiceMsg) {
-      logger.warn({ botUsername }, "No invoice message received from PremiumBot");
+      logger.warn({ botUsername, firstMsgText: firstMsgText.slice(0, 120) }, "No invoice message received from PremiumBot");
     } else {
       logger.info({ botUsername, title: invoiceMsg.media?.title }, "Received invoice message");
     }
-    return invoiceMsg;
+    return { invoice: invoiceMsg ?? null, firstMsgText };
   } catch (err) {
     logger.error({ err }, "getInvoiceFromPremiumBot error");
-    return null;
+    return { invoice: null, firstMsgText: null };
   }
 }
 
@@ -2431,12 +2433,35 @@ export async function runFullPremiumFlow(
 
   // ── Step 1: Send /start → get invoice ────────────────────────────────────────
   await progress(`1️⃣ @${premiumBotUsername} ga /start yuborilmoqda...`);
-  const invoiceMsg = await getInvoiceFromPremiumBot(client, premiumBotUsername);
+  const { invoice: invoiceMsg, firstMsgText } = await getInvoiceFromPremiumBot(client, premiumBotUsername);
   if (!invoiceMsg) {
-    // @PremiumBot reported an existing active plan instead of an invoice. Don't
-    // just trust that text — log out and confirm via the manba/source bot
-    // (@RePreAmooBot) so the "Check Premium" step actually runs, same as the
-    // normal purchase path.
+    if (firstMsgText === null) {
+      // Bot umuman javob bermadi — xato, premium tekshirishga o'tish noto'g'ri
+      return {
+        success: false,
+        hasPremium: false,
+        message: `@${premiumBotUsername} javob bermadi (30s timeout) — tarmoq yoki sessiya muammosi`,
+      };
+    }
+    // Bot birinchi xabar yubordi lekin invoice kelmadi — "allaqachon premium" bo'lishi mumkin
+    const lower = firstMsgText.toLowerCase();
+    const looksAlreadyActive =
+      lower.includes("your telegram premium plan") ||
+      lower.includes("you have an active") ||
+      lower.includes("premium plan") ||
+      (lower.includes("premium") && lower.includes("next payment"));
+    if (!looksAlreadyActive) {
+      // Noma'lum xabar — invoice kutilayotgan edi, kelmadi
+      await progress(
+        `⚠️ @${premiumBotUsername} invoice bermadi. Xabar: "${firstMsgText.slice(0, 100)}"`,
+      );
+      return {
+        success: false,
+        hasPremium: false,
+        message: `@${premiumBotUsername} invoice bermadi — kutilmagan xabar: "${firstMsgText.slice(0, 120)}"`,
+      };
+    }
+    // "Already active" xabari — to'lov shart emas, repream orqali tekshiramiz
     await progress(`@${premiumBotUsername} invoice bermadi — allaqachon Premium bo'lishi mumkin, ${repreamBotUsername} orqali tekshirilmoqda...`);
     return logoutAndVerify();
   }
