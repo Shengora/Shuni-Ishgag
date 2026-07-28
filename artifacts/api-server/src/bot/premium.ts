@@ -1092,11 +1092,13 @@ export async function payPremiumViaWebApp(
       const launchOpts = {
         headless: true,
         ...(executablePath ? { executablePath } : {}),
-        // --no-sandbox: required to run Chromium as root/in a container without
-        // user namespaces. --disable-dev-shm-usage: /dev/shm is tiny (or absent)
-        // in constrained VM containers, which otherwise crashes/hangs Chromium
-        // renderer processes. --disable-gpu: no GPU device available here.
-        args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        // --no-sandbox + --disable-setuid-sandbox: required in containers/as root
+        // (no user namespaces). Both flags needed — setuid-sandbox is a separate
+        // layer from the regular sandbox that also fails in restricted runtimes.
+        // --disable-dev-shm-usage: /dev/shm is tiny (or absent) in constrained VM
+        // containers, which otherwise crashes/hangs Chromium renderer processes.
+        // --disable-gpu: no GPU device available here.
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         ...(cfg ? {
           proxy: {
             server: cfg.server,
