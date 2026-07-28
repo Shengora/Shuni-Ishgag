@@ -48,6 +48,7 @@ import { E, EID } from "../lib/emoji.js";
 import {
   isActiveAdmin,
   isSuperAdmin,
+  isAnySuperAdmin,
   ensureSuperAdminSeeded,
   recordStat,
   getAdminStats,
