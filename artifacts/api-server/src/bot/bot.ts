@@ -1551,47 +1551,43 @@ export function createBot() {
 
   // ── /getnumber ────────────────────────────────────────────────────────────────
   bot.command("getnumber", async (ctx) => {
-    const client = await getMasterClient(ctx.from!.id);
-    if (!client) {
-      await ctx.reply(
-        "❌ Operator hisob ulanmagan.\nAvval /login buyrug'ini yuboring.",
-      );
-      return;
-    }
-
     const repreamBot = await getOperatorSource(ctx.from!.id);
     const statusMsg = await ctx.reply(
       `${E.CLOCK} @${repreamBot} dan raqam so'ralmoqda...`,
       { parse_mode: "HTML" },
     );
+    const chatId = ctx.chat!.id;
+    const msgId = statusMsg.message_id;
+    const uid = ctx.from!.id;
+
+    // getMasterClient + sendCommandAndWaitForNumber (up to 30 s) moved inside
+    // void so the handler returns immediately and the runner can process more
+    // updates from this operator without blocking.
+    void (async () => {
+    const client = await getMasterClient(uid);
+    if (!client) {
+      await ctx.api.editMessageText(chatId, msgId,
+        "❌ Operator hisob ulanmagan. /login buyrug'ini yuboring.",
+      ).catch(() => {});
+      return;
+    }
 
     try {
-      const result = await sendCommandAndWaitForNumber(
-        client,
-        repreamBot,
-        "/getnumber",
-      );
+      const result = await sendCommandAndWaitForNumber(client, repreamBot, "/getnumber");
 
       if (!result) {
-        await ctx.api.editMessageText(
-          ctx.chat!.id,
-          statusMsg.message_id,
+        await ctx.api.editMessageText(chatId, msgId,
           `${E.NO} @${repreamBot} dan javob kelmadi. Keyinroq urinib ko'ring.`,
-        );
+        ).catch(() => {});
         return;
       }
 
       await db
         .delete(pendingNumbers)
-        .where(
-          and(
-            eq(pendingNumbers.requestedByUserId, ctx.from!.id),
-            eq(pendingNumbers.status, "waiting"),
-          ),
-        );
+        .where(and(eq(pendingNumbers.requestedByUserId, uid), eq(pendingNumbers.status, "waiting")));
 
       await db.insert(pendingNumbers).values({
-        requestedByUserId: ctx.from!.id,
+        requestedByUserId: uid,
         phone: result.phone,
         providerBot: repreamBot,
         repreamMessageId: result.messageId,
@@ -1601,25 +1597,20 @@ export function createBot() {
       });
 
       const keyboard = new InlineKeyboard()
-        .text("Cancel", `cancel:${ctx.from!.id}`).icon(EID.NO).danger()
-        .text("Freeze", `freeze:${ctx.from!.id}`).icon(EID.LOCK).primary()
-        .text("Get Code", `getcode:${ctx.from!.id}`).icon(EID.PHONE).success();
+        .text("Cancel", `cancel:${uid}`).icon(EID.NO).danger()
+        .text("Freeze", `freeze:${uid}`).icon(EID.LOCK).primary()
+        .text("Get Code", `getcode:${uid}`).icon(EID.PHONE).success();
 
-      await ctx.api.editMessageText(
-        ctx.chat!.id,
-        statusMsg.message_id,
+      await ctx.api.editMessageText(chatId, msgId,
         `${E.PHONE} <b>Raqam olindi!</b>\n\n<code>${result.phone}</code>\n\nQuyidagi tugmalardan birini tanlang:`,
         { parse_mode: "HTML", reply_markup: keyboard },
-      );
+      ).catch(() => {});
     } catch (err: any) {
       logger.error({ err }, "getnumber command error");
       await notifyError(err, "getnumber command error");
-      await ctx.api.editMessageText(
-        ctx.chat!.id,
-        statusMsg.message_id,
-        `❌ Xato: ${err.message}`,
-      );
+      await ctx.api.editMessageText(chatId, msgId, `❌ Xato: ${err.message}`).catch(() => {});
     }
+    })(); // end void getnumber worker
   });
 
   // ── /list ─────────────────────────────────────────────────────────────────────
@@ -1787,12 +1778,7 @@ export function createBot() {
     const pending = await db
       .select()
       .from(pendingNumbers)
-      .where(
-        and(
-          eq(pendingNumbers.requestedByUserId, userId),
-          eq(pendingNumbers.status, "waiting"),
-        ),
-      )
+      .where(and(eq(pendingNumbers.requestedByUserId, userId), eq(pendingNumbers.status, "waiting")))
       .limit(1);
 
     if (!pending.length) {
@@ -1800,6 +1786,18 @@ export function createBot() {
       return;
     }
 
+    // DB update + UI response immediately — provider-side cancel button press
+    // (getMasterClient + clickRepreamButton, up to 45 s on reconnect) runs in
+    // background so the operator isn't frozen waiting for Telegram round-trips.
+    await db
+      .update(pendingNumbers)
+      .set({ status: "cancelled" })
+      .where(eq(pendingNumbers.id, pending[0].id));
+
+    await ctx.editMessageText("❌ Raqam bekor qilindi.").catch(() => {});
+    await ctx.answerCallbackQuery().catch(() => {});
+
+    void (async () => {
     const client = await getMasterClient(ctx.from.id);
     if (client && pending[0].repreamMessageId && pending[0].cancelData) {
       try {
@@ -1811,14 +1809,7 @@ export function createBot() {
         );
       } catch (_) {}
     }
-
-    await db
-      .update(pendingNumbers)
-      .set({ status: "cancelled" })
-      .where(eq(pendingNumbers.id, pending[0].id));
-
-    await ctx.editMessageText("❌ Raqam bekor qilindi.");
-    await ctx.answerCallbackQuery().catch(() => {});
+    })(); // end void cancel worker
   });
 
   // ── Callback: Freeze (manual) ─────────────────────────────────────────────────
@@ -1846,13 +1837,16 @@ export function createBot() {
     }
 
     await ctx.answerCallbackQuery("⏳ Freeze qilinmoqda...").catch(() => {});
-
-    // Edit the original message first, then use autoFreezeAndNotify for DB + new button
     await ctx.editMessageText(
       `🧊 <code>${pending[0].phone}</code> freeze qilinyapti...`,
       { parse_mode: "HTML" },
-    );
+    ).catch(() => {});
+
+    // autoFreezeAndNotify calls getMasterClient + clickRepreamButton (up to 45 s).
+    // Detach so the handler returns immediately.
+    void (async () => {
     await autoFreezeAndNotify(ctx, pending[0], "Operator tomonidan");
+    })(); // end void freeze worker
   });
 
   // ── Callback: Get Code ────────────────────────────────────────────────────────
@@ -2289,12 +2283,16 @@ export function createBot() {
   // 📱 Get number — show source picker (if >1) then count picker
   bot.callbackQuery("menu_getnumber", async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
-    const client = await getMasterClient(ctx.from.id);
+    const uid = ctx.from.id;
+
+    // getMasterClient moved inside void — on reconnect it can block 45 s.
+    void (async () => {
+    const client = await getMasterClient(uid);
     if (!client) {
       await ctx.reply(
         "❌ Operator hisob ulanmagan.\n\n🔑 Avval login qiling:",
         { reply_markup: new InlineKeyboard().text("Login", "menu_login").icon(EID.KEY).success() },
-      );
+      ).catch(() => {});
       return;
     }
 
@@ -2304,8 +2302,7 @@ export function createBot() {
       .where(eq(providerBots.isActive, true));
 
     if (activeBots.length > 1) {
-      // Show source picker: each active bot as a button
-      const current = operatorSelectedSource.get(ctx.from.id);
+      const current = operatorSelectedSource.get(uid);
       const kb = new InlineKeyboard();
       for (const b of activeBots) {
         const isSelected = b.username === current;
@@ -2317,37 +2314,42 @@ export function createBot() {
           (current ? `Joriy: @${current}\n\n` : "") +
           `Qaysi botdan raqam olmoqchisiz?`,
         { parse_mode: "HTML", reply_markup: kb },
-      );
+      ).catch(() => {});
       return;
     }
 
-    // Single bot — skip picker
     if (activeBots.length === 1) {
-      operatorSelectedSource.set(ctx.from.id, activeBots[0].username);
+      operatorSelectedSource.set(uid, activeBots[0].username);
     }
 
     await ctx.reply(
       `${E.PHONE} <b>Nechta raqam olish kerak?</b>\n\nRaqam olinib, avtomatik sessiya yaratiladi.`,
       { parse_mode: "HTML", reply_markup: countPickerKeyboard() },
-    );
+    ).catch(() => {});
+    })(); // end void menu_getnumber worker
   });
 
   // 🌐 Source picked — save + show count picker
   bot.callbackQuery(/^src_pick:(.+)$/, async (ctx) => {
     const botname = ctx.match[1];
-    operatorSelectedSource.set(ctx.from.id, botname);
+    const uid = ctx.from.id;
+    operatorSelectedSource.set(uid, botname);
     await ctx.answerCallbackQuery(`✅ @${botname} tanlandi`).catch(() => {});
-    const client = await getMasterClient(ctx.from.id);
+
+    // getMasterClient moved inside void — on reconnect it can block 45 s.
+    void (async () => {
+    const client = await getMasterClient(uid);
     if (!client) {
       await ctx.reply("❌ Operator hisob ulanmagan.", {
         reply_markup: new InlineKeyboard().text("Login", "menu_login").icon(EID.KEY).success(),
-      });
+      }).catch(() => {});
       return;
     }
     await ctx.reply(
       `${E.PHONE} <b>Nechta raqam olish kerak?</b>\n\n${E.GLOBE} Manba: @${botname}`,
       { parse_mode: "HTML", reply_markup: countPickerKeyboard() },
-    );
+    ).catch(() => {});
+    })(); // end void src_pick worker
   });
 
   // 🔢 Batch: fetch N numbers fully automatically
