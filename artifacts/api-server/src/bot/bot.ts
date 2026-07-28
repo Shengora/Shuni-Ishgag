@@ -1885,19 +1885,19 @@ export function createBot() {
       { parse_mode: "HTML" },
     );
 
-    const client = await getMasterClient(ctx.from.id);
-    if (!client) {
-      await ctx.reply("❌ Operator hisob ulanmagan. /login buyrug'ini yuboring.");
-      return;
-    }
-
     // ── Step 1: Send auth code to Telegram ───────────────────────────────────
     await ctx.reply(
       `⏳ Telegram ga <code>${pending[0].phone}</code> raqamiga kod yuborilmoqda...`,
       { parse_mode: "HTML" },
     );
 
+    // getMasterClient moved inside void — connectWithCleanup can block 45 s.
     void (async () => {
+    const client = await getMasterClient(ctx.from.id);
+    if (!client) {
+      await ctx.reply("❌ Operator hisob ulanmagan. /login buyrug'ini yuboring.").catch(() => {});
+      return;
+    }
     let phoneCodeHash: string;
     try {
       phoneCodeHash = await sendCodeForPhone(pending[0].phone);
@@ -2105,18 +2105,19 @@ export function createBot() {
 
     await ctx.answerCallbackQuery("⏳ Yangi raqam olinmoqda...").catch(() => {});
 
-    const masterClient = await getMasterClient(ctx.from.id);
-    if (!masterClient) {
-      await ctx.reply(
-        "❌ Operator hisob ulanmagan.\nAvval /login buyrug'ini yuboring.",
-      );
-      return;
-    }
-
     const newBot = await getOperatorSource(userId);
     const statusMsg = await ctx.reply(`⏳ @${newBot} dan yangi raqam so'ralmoqda...`);
 
+    // getMasterClient moved inside void — connectWithCleanup can block 45 s.
     void (async () => {
+    const masterClient = await getMasterClient(ctx.from.id);
+    if (!masterClient) {
+      await ctx.api.editMessageText(
+        ctx.chat!.id, statusMsg.message_id,
+        "❌ Operator hisob ulanmagan. /login buyrug'ini yuboring.",
+      ).catch(() => {});
+      return;
+    }
     try {
       const result = await sendCommandAndWaitForNumber(
         masterClient,
@@ -2369,18 +2370,6 @@ export function createBot() {
     batchRunning.add(uid);
     await ctx.answerCallbackQuery(`⏳ ${total} ta raqam olinmoqda...`).catch(() => {});
 
-    const client = await getMasterClient(uid);
-    if (!client) {
-      batchRunning.delete(uid);
-      await ctx.reply("❌ Operator hisob ulanmagan.", {
-        reply_markup: new InlineKeyboard().text("Login", "menu_login").icon(EID.KEY).success(),
-      });
-      return;
-    }
-
-    // Use operator's manually selected source bot for this batch
-    const srcBot = await getOperatorSource(uid);
-
     const statusMsg = await ctx.reply(
       `${E.CLOCK} <b>0 / ${total}</b> sessiya yaratildi...\n\n${E.REFRESH} Boshlanmoqda...`,
       { parse_mode: "HTML" },
@@ -2389,9 +2378,23 @@ export function createBot() {
     const chatId = ctx.chat!.id;
     const msgId = statusMsg.message_id;
 
-    // Detach long work so the grammyjs runner can process other updates
-    // from this operator immediately (sequential-per-chat rule would block them).
+    // Detach long work so the grammyjs runner can process other updates from
+    // this operator immediately. getMasterClient is inside the IIFE because
+    // connectWithCleanup can block up to 45 s on reconnect — calling it
+    // outside would freeze the entire handler chain for that long.
     void (async () => {
+    const client = await getMasterClient(uid);
+    if (!client) {
+      batchRunning.delete(uid);
+      await ctx.api.editMessageText(chatId, msgId,
+        "❌ Operator hisob ulanmagan. /login buyrug'ini yuboring.",
+        { reply_markup: new InlineKeyboard().text("Login", "menu_login").icon(EID.KEY).success() },
+      ).catch(() => {});
+      return;
+    }
+
+    // Use operator's manually selected source bot for this batch
+    const srcBot = await getOperatorSource(uid);
     let success = 0;
     let failed = 0;
     const lines: string[] = [];
