@@ -2152,14 +2152,24 @@ async function _checkPremiumWithRepreamImpl(
 
     let callbackText = "";
     try {
-      const peer = await client.getInputEntity(repreamBotUsername);
-      const callbackAnswer = await client.invoke(
-        new Api.messages.GetBotCallbackAnswer({
-          peer,
-          msgId: checkPremiumMsgId,
-          data: checkPremiumData,
-        }),
-      ) as { message?: string };
+      const peer = await Promise.race([
+        client.getInputEntity(repreamBotUsername),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("getInputEntity timeout")), 10_000),
+        ),
+      ]);
+      const callbackAnswer = await Promise.race([
+        client.invoke(
+          new Api.messages.GetBotCallbackAnswer({
+            peer,
+            msgId: checkPremiumMsgId,
+            data: checkPremiumData,
+          }),
+        ) as Promise<{ message?: string }>,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("GetBotCallbackAnswer timeout (20s)")), 20_000),
+        ),
+      ]);
 
       // Fast path: some bots return the premium status directly in the callback
       // answer popup (the `message` field of BotCallbackAnswer).
@@ -2397,6 +2407,11 @@ export async function runFullPremiumFlow(
           break;
         }
         logger.info({ attempt, rawText: check.rawText.slice(0, 80) }, "Step 8: premium not yet active");
+        if (attempt === maxAttempts - 1) {
+          await progress(
+            `❌ ${maxAttempts} urinishdan keyin premium tasdiqlanmadi — @${repreamBotUsername} javob: "${check.rawText.slice(0, 120) || "bo'sh"}"`,
+          );
+        }
       }
     } else {
       logger.warn("Step 8: no masterClient provided — skipping repream premium check");
