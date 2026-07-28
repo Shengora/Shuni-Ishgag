@@ -29,6 +29,20 @@ const CONNECT_RETRIES = 2;
 // ── Per-operator client caches ─────────────────────────────────────────────────
 // Active master clients: one per operatorId (the first working slot found).
 const _masterClients = new Map<number, TelegramClient>();
+
+// ── Per-client sendCommand mutex ───────────────────────────────────────────────
+// sendCommandAndWaitForNumber registers an event listener then sends a command.
+// If two callers share the same TelegramClient and run concurrently, the first
+// bot response fires BOTH listeners — one call steals the other's number.
+// This queue serialises all sendCommandAndWaitForNumber calls per TelegramClient
+// instance so only one is in-flight at a time.
+const _sendCommandQueues = new WeakMap<TelegramClient, Promise<unknown>>();
+function enqueueSendCommand<T>(client: TelegramClient, fn: () => Promise<T>): Promise<T> {
+  const prev = _sendCommandQueues.get(client) ?? Promise.resolve();
+  const next = prev.then(() => fn(), () => fn()); // run even if previous threw
+  _sendCommandQueues.set(client, next.catch(() => {})); // store settled tail
+  return next;
+}
 // Pending (not-yet-authorized) login clients, keyed by "${operatorId}:${slot}"
 // so a super admin can run up to 3 parallel login flows simultaneously.
 const _pendingClients = new Map<string, { client: TelegramClient; createdAt: number }>();
@@ -1191,7 +1205,15 @@ export interface RepreamResult {
   };
 }
 
-export async function sendCommandAndWaitForNumber(
+export function sendCommandAndWaitForNumber(
+  client: TelegramClient,
+  botUsername: string,
+  command: string,
+): Promise<RepreamResult | null> {
+  return enqueueSendCommand(client, () => _sendCommandAndWaitForNumberImpl(client, botUsername, command));
+}
+
+async function _sendCommandAndWaitForNumberImpl(
   client: TelegramClient,
   botUsername: string,
   command: string,
