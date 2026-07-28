@@ -9,18 +9,21 @@ import { db } from "@workspace/db";
 import { masterSessions, userbotSessions } from "@workspace/db";
 import { eq, and, asc } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
-import { withTimeout } from "../lib/timeout.js";
+import { withTimeout, isTimeoutError } from "../lib/timeout.js";
 
 const API_ID = parseInt(process.env.API_ID || "0");
 const API_HASH = process.env.API_HASH || "";
 
 // Max time to wait for an MTProto connection before giving up. A dead/slow proxy
 // is the most common freeze source, so bound every connect() to fail fast.
-const CLIENT_CONNECT_TIMEOUT_MS = 20_000;
+// 45s per attempt — Replit → Telegram MTProto can be slow on cold connections.
+const CLIENT_CONNECT_TIMEOUT_MS = 45_000;
 // Any single MTProto RPC call (getInputEntity, invoke, etc.) must resolve or
 // fail within this window — an unbounded call on a stalled connection would
 // otherwise freeze the whole flow forever.
-const RPC_TIMEOUT_MS = 20_000;
+const RPC_TIMEOUT_MS = 30_000;
+// How many times to retry a timed-out connect before giving up entirely.
+const CONNECT_RETRIES = 2;
 
 
 // ── Per-operator client caches ─────────────────────────────────────────────────
@@ -54,25 +57,36 @@ export class TwoFARequiredError extends Error {
 }
 
 /**
- * Connect a client with a bounded timeout. `withTimeout` rejects on time-out but
- * cannot cancel the underlying gramJS connect, so on any failure we disconnect
- * the client to avoid leaking a dangling connection attempt/socket, then rethrow.
- * Every connect path in this module must go through here so none can hang.
+ * Connect a client with a bounded timeout + retry on timeout.
+ * Retries up to CONNECT_RETRIES times if the connection times out (slow network).
+ * On any non-timeout error or exhausted retries, disconnects the client cleanly.
  */
 export async function connectWithCleanup(
   client: TelegramClient,
   label = "Telegram ulanish",
 ): Promise<void> {
-  try {
-    await withTimeout(client.connect(), CLIENT_CONNECT_TIMEOUT_MS, label);
-  } catch (err) {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= CONNECT_RETRIES + 1; attempt++) {
     try {
-      await client.disconnect();
-    } catch (_) {
-      /* ignore */
+      await withTimeout(client.connect(), CLIENT_CONNECT_TIMEOUT_MS, label);
+      return; // success
+    } catch (err) {
+      lastErr = err;
+      if (!isTimeoutError(err)) {
+        // Non-timeout error — no point retrying, clean up and bail immediately
+        try { await client.disconnect(); } catch (_) { /* ignore */ }
+        throw err;
+      }
+      if (attempt <= CONNECT_RETRIES) {
+        logger.warn({ attempt, label }, "Telegram ulanish timeout — qayta urinilmoqda...");
+        // Brief pause before retry to let any half-open socket settle
+        await new Promise(r => setTimeout(r, 2000));
+      }
     }
-    throw err;
   }
+  // All attempts exhausted
+  try { await client.disconnect(); } catch (_) { /* ignore */ }
+  throw lastErr;
 }
 
 // ── Userbot session invalidation & cleanup ─────────────────────────────────────
