@@ -612,8 +612,17 @@ export async function pollPremiumActiveViaStart(
         logger.info({ premiumBotUsername, attempt: i + 1 }, "pollPremiumActiveViaStart: Premium confirmed active");
         return true;
       }
-    } catch (err) {
-      logger.warn({ err, attempt: i + 1 }, "pollPremiumActiveViaStart: attempt failed — retrying");
+    } catch (err: any) {
+      const isDisconnected =
+        err?.message?.includes("disconnected") ||
+        err?.message?.includes("Please reconnect") ||
+        err?.message?.includes("not connected");
+      if (isDisconnected) {
+        logger.warn({ attempt: i + 1 }, "pollPremiumActiveViaStart: client disconnected — attempting reconnect before retry");
+        try { await client.connect(); } catch (_) {}
+      } else {
+        logger.warn({ err, attempt: i + 1 }, "pollPremiumActiveViaStart: attempt failed — retrying");
+      }
     }
   }
   return false;
@@ -1368,7 +1377,22 @@ export async function payPremiumViaWebApp(
       await page.waitForTimeout(10000);
     }
 
-    const [expMonth, rawYear] = card.expiry.split("/");
+    // Normalise expiry to expMonth / rawYear regardless of storage format.
+    // Canonical is "MM/YY" but guard against legacy "MMYY" (4-digit, no slash)
+    // so a wrongly-stored card can't crash this step with rawYear = undefined.
+    let expMonth: string;
+    let rawYear: string;
+    if (card.expiry.includes("/")) {
+      [expMonth, rawYear] = card.expiry.split("/");
+    } else if (card.expiry.length === 4) {
+      expMonth = card.expiry.slice(0, 2);
+      rawYear  = card.expiry.slice(2, 4);
+      logger.warn({ expiry: card.expiry }, "Card expiry stored in legacy MMYY format — parsed defensively");
+    } else {
+      logger.error({ expiry: card.expiry }, "Unrecognised card expiry format — falling back to safe defaults");
+      expMonth = "01";
+      rawYear  = "99";
+    }
     const cardNum = card.cardNumber.replace(/\s/g, "");
     const expFull = `${expMonth.padStart(2, "0")} / ${rawYear.padStart(2, "0")}`;
     const expShort = `${expMonth.padStart(2, "0")}/${rawYear.padStart(2, "0")}`;

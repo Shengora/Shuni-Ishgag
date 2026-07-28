@@ -605,9 +605,30 @@ export async function completeMasterLogin2FA(
   }
   const client = pending.client;
 
-  const passwordInfo = await withTimeout(client.invoke(new Api.account.GetPassword()), RPC_TIMEOUT_MS, "GetPassword");
-  const check = await computeCheck(passwordInfo, password.trim());
-  await withTimeout(client.invoke(new Api.auth.CheckPassword({ password: check })), RPC_TIMEOUT_MS, "CheckPassword");
+  // SRP_ID_INVALID: the server's SRP session expires quickly (~30 s).
+  // If it fires we must re-fetch GetPassword (new SRP ID) and retry — up to 3 times.
+  const MAX_SRP_RETRIES = 3;
+  let lastSrpError: any;
+  for (let attempt = 0; attempt < MAX_SRP_RETRIES; attempt++) {
+    try {
+      const passwordInfo = await withTimeout(client.invoke(new Api.account.GetPassword()), RPC_TIMEOUT_MS, "GetPassword");
+      const check = await computeCheck(passwordInfo, password.trim());
+      await withTimeout(client.invoke(new Api.auth.CheckPassword({ password: check })), RPC_TIMEOUT_MS, "CheckPassword");
+      lastSrpError = undefined;
+      break; // success
+    } catch (err: any) {
+      const isSrpExpired =
+        err?.errorMessage === "SRP_ID_INVALID" ||
+        err?.message?.includes("SRP_ID_INVALID");
+      if (isSrpExpired && attempt < MAX_SRP_RETRIES - 1) {
+        logger.warn({ attempt }, "SRP_ID_INVALID on CheckPassword — refetching GetPassword and retrying");
+        lastSrpError = err;
+        continue;
+      }
+      throw err;
+    }
+  }
+  if (lastSrpError) throw lastSrpError;
 
   const sessionString = client.session.save() as unknown as string;
   _masterClients.set(operatorId, client);
@@ -1011,13 +1032,33 @@ export async function signInWithCodeAndPass(
 
     if (is2FA && pass) {
       // Auto-complete 2FA with the password provided by @RePreAmooBot
-      const passwordInfo = await withTimeout(client.invoke(new Api.account.GetPassword()), RPC_TIMEOUT_MS, "GetPassword");
+      // SRP_ID_INVALID: re-fetch GetPassword (new SRP ID) and retry up to 3 times.
       const pwdMod = await import("telegram/Password.js" as string);
-      const computeCheck: (pwd: any, password: string) => Promise<any> =
+      const computeCheckFn: (pwd: any, password: string) => Promise<any> =
         pwdMod.computeCheck ?? pwdMod.default?.computeCheck;
-      if (!computeCheck) throw new Error("computeCheck funksiyasi topilmadi");
-      const check = await computeCheck(passwordInfo, pass);
-      await withTimeout(client.invoke(new Api.auth.CheckPassword({ password: check })), RPC_TIMEOUT_MS, "CheckPassword");
+      if (!computeCheckFn) throw new Error("computeCheck funksiyasi topilmadi");
+      const MAX_SRP_RETRIES = 3;
+      let lastSrpErr: any;
+      for (let attempt = 0; attempt < MAX_SRP_RETRIES; attempt++) {
+        try {
+          const passwordInfo = await withTimeout(client.invoke(new Api.account.GetPassword()), RPC_TIMEOUT_MS, "GetPassword");
+          const check = await computeCheckFn(passwordInfo, pass);
+          await withTimeout(client.invoke(new Api.auth.CheckPassword({ password: check })), RPC_TIMEOUT_MS, "CheckPassword");
+          lastSrpErr = undefined;
+          break;
+        } catch (srpErr: any) {
+          const isSrpExpired =
+            srpErr?.errorMessage === "SRP_ID_INVALID" ||
+            srpErr?.message?.includes("SRP_ID_INVALID");
+          if (isSrpExpired && attempt < MAX_SRP_RETRIES - 1) {
+            logger.warn({ attempt }, "SRP_ID_INVALID on userbot CheckPassword — retrying GetPassword");
+            lastSrpErr = srpErr;
+            continue;
+          }
+          throw srpErr;
+        }
+      }
+      if (lastSrpErr) throw lastSrpErr;
     } else {
       throw err;
     }

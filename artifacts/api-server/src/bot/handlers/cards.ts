@@ -40,15 +40,16 @@ export function registerCardsHandlers(bot: Bot): void {
     const expiryRaw  = parts[2]; // e.g. "12/26" or "1226"
     const cvv        = parts[3];
 
-    // Normalise expiry to MMYY (4 digits)
-    const expiry = expiryRaw.replace(/\D/g, "");
-    if (expiry.length !== 4) {
+    // Normalise to MM/YY canonical format (premium.ts expects "MM/YY" for split("/"))
+    const expiryDigits = expiryRaw.replace(/\D/g, "");
+    if (expiryDigits.length !== 4) {
       await ctx.reply(
         `${E.NO} Muddat noto'g'ri. MM/YY formatida kiriting, masalan <code>12/26</code>.`,
         { parse_mode: "HTML" },
       );
       return;
     }
+    const expiry = `${expiryDigits.slice(0, 2)}/${expiryDigits.slice(2, 4)}`; // → "12/26"
     if (cardNumber.length < 13 || cardNumber.length > 19) {
       await ctx.reply(`${E.NO} Karta raqami noto'g'ri uzunlikda (${cardNumber.length} ta raqam).`, { parse_mode: "HTML" });
       return;
@@ -90,14 +91,12 @@ export function registerCardsHandlers(bot: Bot): void {
     await recordStat(userId, "card_added");
 
     const maskedFull = cardNumber.replace(/(.{4})/g, "$1 ").trim();
-    const mm = expiry.slice(0, 2);
-    const yy = expiry.slice(2, 4);
 
     await ctx.reply(
       `${E.OK} <b>Karta qo'shildi!</b>\n\n` +
       `🏦 Bank: <b>${bankName}</b>\n` +
       `💳 Raqam: <code>${maskedFull}</code>\n` +
-      `📅 Muddat: ${mm}/${yy}\n` +
+      `📅 Muddat: ${expiry}\n` +
       (isDefault ? `\n${E.STAR} Asosiy karta sifatida belgilandi` : ""),
       { parse_mode: "HTML", reply_markup: menuButton() },
     );
@@ -138,10 +137,8 @@ export function registerCardsHandlers(bot: Bot): void {
     await reply(
       `${E.CARD} <b>Saqlangan kartalar</b> (${cards.length} ta):\n\n` +
         cards.map(c => {
-          const mm = c.expiry.slice(0, 2);
-          const yy = c.expiry.slice(2, 4);
           const def = c.isDefault ? ` ${E.STAR} asosiy` : "";
-          return `• ****${c.cardNumber.slice(-4)} (${mm}/${yy})${def}`;
+          return `• ****${c.cardNumber.slice(-4)} (${c.expiry})${def}`;
         }).join("\n"),
       { parse_mode: "HTML", reply_markup: kb },
     );
@@ -176,8 +173,6 @@ export function registerCardsHandlers(bot: Bot): void {
       return;
     }
 
-    const mm = card.expiry.slice(0, 2);
-    const yy = card.expiry.slice(2, 4);
     const masked = card.cardNumber.replace(/(.{4})/g, "$1 ").trim();
 
     const kb = new InlineKeyboard();
@@ -190,7 +185,7 @@ export function registerCardsHandlers(bot: Bot): void {
     await ctx.reply(
       `${E.CARD} <b>Karta ma'lumotlari</b>\n\n` +
       `💳 Raqam: <code>${masked}</code>\n` +
-      `📅 Muddat: ${mm}/${yy}\n` +
+      `📅 Muddat: ${card.expiry}\n` +
       `🔒 CVV: <code>${card.cvv}</code>\n` +
       (card.cardHolder ? `👤 Egasi: ${card.cardHolder}\n` : "") +
       (card.isDefault ? `\n${E.STAR} Bu asosiy karta` : ""),
