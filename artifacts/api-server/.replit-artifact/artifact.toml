@@ -27,6 +27,8 @@ args = ["sh", "artifacts/api-server/start-prod.sh"]
 [services.production.run.env]
 PORT = "8080"
 NODE_ENV = "production"
+# Clear the stale 1.55-era Nix path so the installed bundled browser is used instead
+REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE = ""
 
 [services.production.health.startup]
 path = "/api/healthz"
