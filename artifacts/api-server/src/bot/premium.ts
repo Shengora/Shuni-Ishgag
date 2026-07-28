@@ -317,11 +317,14 @@ const PROXY_MAX_FAILURES = Number.isFinite(_rawMaxFailures) && _rawMaxFailures >
   : 3;
 
 // ── Short-term proxy cooldown ────────────────────────────────────────────────
-// A PAYMENT_FAILED decline from Telegram/the bank can be an anti-fraud
-// signal tied to the tokenizing browser's IP. Rather than waiting for
-// PROXY_MAX_FAILURES connect failures to auto-retire the proxy (that counter
-// is for dead/unreachable proxies), put it on an immediate in-memory cooldown
-// so the very next selection picks a different IP — i.e. "avto ip almashtir".
+// Used when the Smart Glocal tokenization page itself shows a card-blocked /
+// anti-fraud error (HTML visible in the browser) — meaning the proxy's
+// fingerprint likely triggered the payment provider's bot detection. This is
+// different from a bank-side PAYMENT_FAILED at step 5 (MTProto
+// SendPaymentForm), which is a card issue and must NOT penalise the proxy.
+// Rather than waiting for PROXY_MAX_FAILURES connect failures to auto-retire
+// the proxy (that counter is for dead/unreachable proxies), put it on an
+// immediate in-memory cooldown so the very next selection picks a different IP.
 const PAYMENT_FAILURE_COOLDOWN_MS = 30 * 60_000; // 30 minutes
 const _proxyCooldownUntil = new Map<number, number>();
 
@@ -2634,18 +2637,18 @@ export async function runFullPremiumFlow(
 
   if (!payResult.success) {
     const isPaymentDeclined = payResult.errorCode === "PAYMENT_FAILED";
-    if (isPaymentDeclined && playwrightProxyIpId) {
-      // Anti-fraud signal likely tied to the tokenizing browser's IP — rotate
-      // away from it immediately (cooldown) and count it toward the
-      // longer-term auto-retirement threshold too.
-      cooldownProxyIp(playwrightProxyIpId);
-      await recordProxyIpFailure(playwrightProxyIpId).catch(() => {});
-    }
+    // PAYMENT_FAILED at step 5 (SendPaymentForm) means the *bank* rejected the
+    // card — the proxy successfully delivered the request and is not at fault.
+    // Do NOT call cooldownProxyIp / recordProxyIpFailure here: penalising the
+    // proxy for a card decline was silently burning through the IP pool (two
+    // different IPs both put on 30-min cooldown by the same bad card).
+    // Proxy failures (network errors, launch timeouts) are recorded earlier in
+    // payPremiumViaWebApp, which is the correct place for them.
     return {
       success: false,
       hasPremium: false,
       message: isPaymentDeclined
-        ? "payments.SendPaymentForm xatosi — to'lov rad etildi (PAYMENT_FAILED)"
+        ? "Bank kartani rad etdi (PAYMENT_FAILED) — boshqa karta sinab ko'ring"
         : "payments.SendPaymentForm xatosi — to'lov o'tmadi",
       paymentDeclined: isPaymentDeclined,
     };
