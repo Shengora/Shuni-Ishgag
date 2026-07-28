@@ -604,7 +604,7 @@ export function createBot() {
   // Restricted to super admins — up to 3 slots per SA.
   bot.command("login", async (ctx) => {
     const operatorId = ctx.from!.id;
-    if (!isSuperAdmin(operatorId)) {
+    if (!await isAnySuperAdmin(operatorId)) {
       await ctx.reply(`${E.NO} Bu buyruq faqat super admin uchun.`, { parse_mode: "HTML" });
       return;
     }
@@ -738,7 +738,7 @@ export function createBot() {
   // ── /code ─────────────────────────────────────────────────────────────────────
   bot.command("code", async (ctx) => {
     const operatorId = ctx.from!.id;
-    if (!isSuperAdmin(operatorId)) {
+    if (!await isAnySuperAdmin(operatorId)) {
       await ctx.reply(`${E.NO} Bu buyruq faqat super admin uchun.`, { parse_mode: "HTML" });
       return;
     }
@@ -822,7 +822,7 @@ export function createBot() {
   // ── /resendcode ───────────────────────────────────────────────────────────────
   bot.command("resendcode", async (ctx) => {
     const operatorId = ctx.from!.id;
-    if (!isSuperAdmin(operatorId)) {
+    if (!await isAnySuperAdmin(operatorId)) {
       await ctx.reply(`${E.NO} Bu buyruq faqat super admin uchun.`, { parse_mode: "HTML" });
       return;
     }
@@ -875,7 +875,7 @@ export function createBot() {
   // ── /2fa ──────────────────────────────────────────────────────────────────────
   bot.command("2fa", async (ctx) => {
     const operatorId = ctx.from!.id;
-    if (!isSuperAdmin(operatorId)) {
+    if (!await isAnySuperAdmin(operatorId)) {
       await ctx.reply(`${E.NO} Bu buyruq faqat super admin uchun.`, { parse_mode: "HTML" });
       return;
     }
@@ -3583,7 +3583,7 @@ export function createBot() {
     await ctx.answerCallbackQuery().catch(() => {});
     const operatorId = ctx.from.id;
 
-    if (!isSuperAdmin(operatorId)) {
+    if (!await isAnySuperAdmin(operatorId)) {
       await ctx.answerCallbackQuery({ text: "❌ Faqat super admin uchun.", show_alert: true }).catch(() => {});
       return;
     }
@@ -3627,7 +3627,7 @@ export function createBot() {
   // Slot "Ulash" — show /login instructions
   bot.callbackQuery(/^login_slot_add:(\d+)$/, async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
-    if (!isSuperAdmin(ctx.from.id)) return;
+    if (!await isAnySuperAdmin(ctx.from.id)) return;
     const slot = parseInt(ctx.match[1]);
     await ctx.reply(
       `${E.ADD} <b>Slot ${slot} — Login</b>\n\nTelefon raqamingizni yuboring:\n<code>/login +998901234567</code>`,
@@ -3637,7 +3637,7 @@ export function createBot() {
 
   bot.callbackQuery(/^login_delete_confirm:(\d+)$/, async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
-    if (!isSuperAdmin(ctx.from.id)) return;
+    if (!await isAnySuperAdmin(ctx.from.id)) return;
     const slot = parseInt(ctx.match[1]);
     const row = await db
       .select({ phone: masterSessions.phone })
@@ -3658,7 +3658,7 @@ export function createBot() {
   bot.callbackQuery(/^login_delete_do:(\d+)$/, async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
     const operatorId = ctx.from.id;
-    if (!isSuperAdmin(operatorId)) return;
+    if (!await isAnySuperAdmin(operatorId)) return;
     const slot = parseInt(ctx.match[1]);
     try {
       await removeMasterSession(operatorId, slot);
