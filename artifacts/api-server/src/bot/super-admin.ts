@@ -1561,6 +1561,9 @@ export function registerSuperAdminCommands(bot: Bot): void {
     } else {
       kb.text("✅ Yoqish", `sa_proxy_toggle:${id}`).row();
     }
+    if (row.failCount > 0) {
+      kb.text("🔄 Xato hisoblagichni nolga tushirish", `sa_proxy_reset_fail:${id}`).row();
+    }
     kb.text("🗑 O'chirish (butunlay)", `sa_proxy_delete:${id}`).row();
     kb.text("◀️ Orqaga", "sa_proxy");
 
@@ -1586,6 +1589,67 @@ export function registerSuperAdminCommands(bot: Bot): void {
       .text("🚫 O'chirish (vaqtincha)", `sa_proxy_toggle:${id}`).row()
       .text("🗑 O'chirish (butunlay)", `sa_proxy_delete:${id}`).row()
       .text("◀️ Orqaga", "sa_proxy");
+    try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }); } catch (_) {}
+  });
+
+  // ── sa_proxy_reset_fail:<id> — confirm before resetting fail counter ─────
+  bot.callbackQuery(/^sa_proxy_reset_fail:(\d+)$/, requireSA, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    await ctx.answerCallbackQuery();
+    const [row] = await db.select().from(proxyIps).where(eq(proxyIps.id, id)).limit(1);
+    await ctx.editMessageText(
+      `⚠️ <b>Tasdiqlang</b>\n\n` +
+      `<code>${row?.server ?? id}</code> proksi IP ning xato hisoblagichini ` +
+      `(<b>${row?.failCount ?? "?"}</b> xato) nolga tushirishni xohlaysizmi?\n\n` +
+      `Keyingi ulanish muvaffaqiyatsizligi uni qayta o'chiradi.`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ Ha, nolga tushirish", `sa_proxy_reset_fail_confirm:${id}`)
+          .text("❌ Yo'q", `sa_proxy_detail:${id}`),
+      },
+    );
+  });
+
+  // ── sa_proxy_reset_fail_confirm:<id> — execute fail counter reset ─────────
+  bot.callbackQuery(/^sa_proxy_reset_fail_confirm:(\d+)$/, requireSA, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    await db.update(proxyIps).set({ failCount: 0, lastFailedAt: null }).where(eq(proxyIps.id, id));
+    await ctx.answerCallbackQuery("✅ Xato hisoblagichi nolga tushirildi");
+    // Re-render full detail view
+    const [row] = await db.select().from(proxyIps).where(eq(proxyIps.id, id)).limit(1);
+    if (!row) return;
+    const { inFlight, cooldowns } = getProxyRuntimeStatus();
+    const onCooldown = cooldowns.has(id);
+    const flying     = inFlight.has(id);
+    let status: string;
+    if (!row.isActive)   status = "🚫 O'chirilgan";
+    else if (flying)     status = "⚡ Hozir ishlatilmoqda";
+    else if (onCooldown) {
+      const minsLeft = Math.ceil((cooldowns.get(id)! - Date.now()) / 60_000);
+      status = `❄️ Cooldownda (${minsLeft} min qoldi)`;
+    }
+    else if (row.usedCount === 0) status = "🟢 Yangi";
+    else status = "🟡 Ishlatilgan";
+
+    const text =
+      `🌐 <b>Proksi IP tafsiloti</b>\n\n` +
+      `🖥 Server: <code>${row.server}</code>\n` +
+      `👤 Login: <code>${row.username ?? "yo'q"}</code>\n` +
+      `📊 Ishlatildi: <b>${row.usedCount}</b> marta\n` +
+      `⏰ Oxirgi: ${row.lastUsedAt ? fmt(row.lastUsedAt) : "hali yo'q"}\n` +
+      `Holat: ${status}\n` +
+      `📅 Qo'shilgan: ${fmt(row.addedAt)}`;
+
+    const kb = new InlineKeyboard();
+    if (row.isActive) {
+      kb.text("⚡ Usageни 0 ga qaytarish", `sa_proxy_zero:${id}`).row();
+      kb.text("🚫 O'chirish (vaqtincha)", `sa_proxy_toggle:${id}`).row();
+    } else {
+      kb.text("✅ Yoqish", `sa_proxy_toggle:${id}`).row();
+    }
+    kb.text("🗑 O'chirish (butunlay)", `sa_proxy_delete:${id}`).row();
+    kb.text("◀️ Orqaga", "sa_proxy");
     try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }); } catch (_) {}
   });
 
