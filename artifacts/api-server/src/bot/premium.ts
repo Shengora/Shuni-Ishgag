@@ -421,6 +421,10 @@ export interface PremiumFlowResult {
 const SELECTORS = {
   /** Card number inputs */
   cardNumber: [
+    // Smart Glocal (Telegram Premium payment provider)
+    'input[name="paymentDetails.card.number"]',
+    'input[placeholder="1234 5678 1234 5678"]',
+    // Standard autocomplete / generic
     'input[autocomplete="cc-number"]',
     'input[name="cardnumber"]',
     'input[name="card_number"]',
@@ -432,6 +436,10 @@ const SELECTORS = {
   ],
   /** Expiry inputs */
   expiry: [
+    // Smart Glocal
+    'input[name="paymentDetails.card.expirationDate"]',
+    'input[placeholder="MM/YY"]',
+    // Standard
     'input[autocomplete="cc-exp"]',
     'input[name="exp-date"]',
     'input[name="expiry"]',
@@ -442,6 +450,10 @@ const SELECTORS = {
   ],
   /** CVC inputs */
   cvc: [
+    // Smart Glocal
+    'input[name="paymentDetails.card.securityCode"]',
+    'input[placeholder="CVC"]',
+    // Standard
     'input[autocomplete="cc-csc"]',
     'input[name="cvc"]',
     'input[name="cvv"]',
@@ -945,13 +957,25 @@ async function handle3dsOtpIfNeeded(
 }
 
 /**
- * Fills a card field. Character-by-character "human-like" typing was tried
- * here and removed on request in favor of a flat 10s pause after all fields
- * are filled (see the wait right before the pay-button click below) —
- * simple `.fill()` again.
+ * Fills a card field in a way that is compatible with Maskito-masked inputs
+ * (used by Smart Glocal). Plain `.fill()` sets the DOM value directly and
+ * bypasses Maskito's keyboard-event hooks, so React's controlled-component
+ * `onChange` never fires and the form state stays empty.
+ *
+ * Strategy:
+ *  1. Click the field to focus it.
+ *  2. Select-all + Delete to clear any existing value (works even when the
+ *     field is controlled and `.fill("")` is not enough).
+ *  3. `pressSequentially` types one character at a time, triggering the full
+ *     keydown → beforeinput → input → keyup chain that Maskito and React
+ *     controlled inputs both rely on.
  */
 async function humanFill(locator: any, text: string): Promise<void> {
-  await locator.fill(text);
+  await locator.click();
+  // Clear existing value the keyboard way so Maskito resets properly
+  await locator.press("Control+a");
+  await locator.press("Delete");
+  await locator.pressSequentially(text, { delay: 40 });
 }
 
 /**
@@ -1289,12 +1313,36 @@ export async function payPremiumViaWebApp(
       }
     }
 
-    await page.waitForTimeout(3000); // let SPA/form render
+    // Wait for the card-number input to actually appear in the DOM (the Smart
+    // Glocal tokenize page is a React SPA — content arrives after JS runs, so
+    // a fixed 3 s sleep often races against slow proxy connections or cold
+    // browser starts).  Fall back to a 10 s sleep if the selector never shows.
+    const CARD_READY_SELECTORS = [
+      'input[autocomplete="cc-number"]',
+      'input[name="paymentDetails.card.number"]',
+      'input[placeholder="1234 5678 1234 5678"]',
+    ];
+    let formReady = false;
+    for (const readySel of CARD_READY_SELECTORS) {
+      try {
+        await page.waitForSelector(readySel, { state: "visible", timeout: 12000 });
+        formReady = true;
+        logger.info({ readySel }, "Card form ready (selector visible)");
+        break;
+      } catch (_) {}
+    }
+    if (!formReady) {
+      logger.warn("Card form selector never appeared — waiting 10 s as fallback");
+      await page.waitForTimeout(10000);
+    }
 
     const [expMonth, rawYear] = card.expiry.split("/");
     const cardNum = card.cardNumber.replace(/\s/g, "");
     const expFull = `${expMonth.padStart(2, "0")} / ${rawYear.padStart(2, "0")}`;
     const expShort = `${expMonth.padStart(2, "0")}/${rawYear.padStart(2, "0")}`;
+    // Maskito auto-inserts the "/" separator — pass only the 4 digits (MMYY)
+    // so pressSequentially doesn't collide with the mask's auto-insert logic.
+    const expDigits = `${expMonth.padStart(2, "0")}${rawYear.padStart(2, "0")}`;
 
     // Save pre-fill screenshot for diagnosis (before any sensitive data is entered)
     await saveFailureScreenshot(page, `${debugLabel}-prefill`);
@@ -1341,7 +1389,7 @@ export async function payPremiumViaWebApp(
 
         const expInput = frame.locator(SELECTORS.stripeExpiry).first();
         if (await expInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-          await humanFill(expInput, expFull);
+          await humanFill(expInput, expDigits);
           stripeFieldsFilled++;
         }
 
@@ -1382,7 +1430,7 @@ export async function payPremiumViaWebApp(
         try {
           const el = page.locator(sel).first();
           if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-            await humanFill(el, expFull).catch(() => humanFill(el, expShort));
+            await humanFill(el, expDigits);
             filledExp = true;
             logger.info({ sel }, "Filled expiry");
             break;
@@ -1454,7 +1502,7 @@ export async function payPremiumViaWebApp(
           if (!filledCard && /card.?num|cardnum|cc.?num|pan/.test(combined)) {
             await humanFill(input, cardNum); filledCard = true;
           } else if (!filledExp && /exp|cc.?exp|muddat/.test(combined)) {
-            await humanFill(input, expShort); filledExp = true;
+            await humanFill(input, expDigits); filledExp = true;
           } else if (!filledCvc && /cvc|cvv|csc|security/.test(combined)) {
             await humanFill(input, card.cvv); filledCvc = true;
           } else if (/holder|owner|name|ism/.test(combined)) {
