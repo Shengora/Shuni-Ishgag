@@ -2377,6 +2377,9 @@ export function createBot() {
     const chatId = ctx.chat!.id;
     const msgId = statusMsg.message_id;
 
+    // Detach long work so the grammyjs runner can process other updates
+    // from this operator immediately (sequential-per-chat rule would block them).
+    void (async () => {
     let success = 0;
     let failed = 0;
     const lines: string[] = [];
@@ -2560,6 +2563,7 @@ export function createBot() {
     } catch (_) {
       await ctx.reply(summary, { parse_mode: "HTML", reply_markup: menuButton() });
     }
+    })(); // end void batch worker
   });
 
   // 📋 Sessions list
@@ -2996,6 +3000,9 @@ export function createBot() {
       );
       msgId = statusMsg.message_id;
 
+      // Detach long work — grammyjs sequential-per-chat rule would block all
+      // other button presses from this operator while premium flow runs.
+      void (async () => {
       const processOneTarget = async (session: (typeof targets)[number], step: number): Promise<void> => {
         const phone = session.phone;
         const relayIndex = step - 1;
@@ -3398,6 +3405,7 @@ export function createBot() {
       } catch (_) {
         await ctx.reply(summary, { parse_mode: "HTML", reply_markup: menuButton() });
       }
+      })(); // end void premium worker
     } finally {
       batchPremiumRunning.delete(operatorId);
     }
