@@ -625,49 +625,77 @@ export async function pollPremiumActiveViaStart(
  * Sends /start to @PremiumBot, waits for an invoice message.
  * Returns the invoice message or null on timeout.
  */
-export async function getInvoiceFromPremiumBot(
+async function _getInvoiceFromPremiumBotOnce(
   client: TelegramClient,
   botUsername: string,
 ): Promise<{ invoice: any | null; firstMsgText: string | null }> {
-  try {
-    // Listen for any message from the bot (invoice or regular)
-    const msgPromise = waitForBotMsg(client, botUsername, () => true, 30000);
-    await client.sendMessage(botUsername, { message: "/start" });
+  // Listen for any message from the bot BEFORE sending /start so we never
+  // miss a fast reply. The listener has a 30 s hard cap.
+  const msgPromise = waitForBotMsg(client, botUsername, () => true, 30000);
 
-    const msg = await msgPromise;
-    if (!msg) {
-      // Pure timeout — bot never responded at all
-      logger.warn({ botUsername }, "No response from PremiumBot after /start");
-      return { invoice: null, firstMsgText: null };
-    }
+  // sendMessage itself can hang indefinitely if the MTProto layer stalls —
+  // race it against a 15 s timeout so the outer retry can kick in.
+  await Promise.race([
+    client.sendMessage(botUsername, { message: "/start" }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("sendMessage /start timeout (15s)")), 15_000),
+    ),
+  ]);
 
-    // Check if the message itself is an invoice
-    const mediaType = msg.media?.className ?? "";
-    if (mediaType === "MessageMediaInvoice") {
-      logger.info({ botUsername, title: msg.media?.title }, "Received invoice message from PremiumBot");
-      return { invoice: msg, firstMsgText: null };
-    }
-
-    // Not an invoice — capture text (may be "already active" or a welcome/loading msg)
-    const firstMsgText: string = (msg.text ?? msg.message ?? "").trim();
-    logger.info({ botUsername, mediaType, text: firstMsgText.slice(0, 120) }, "First message is not invoice — waiting for follow-up invoice");
-
-    const invoiceMsg = await waitForBotMsg(
-      client,
-      botUsername,
-      (m) => m.media?.className === "MessageMediaInvoice",
-      20000,
-    );
-    if (!invoiceMsg) {
-      logger.warn({ botUsername, firstMsgText: firstMsgText.slice(0, 120) }, "No invoice message received from PremiumBot");
-    } else {
-      logger.info({ botUsername, title: invoiceMsg.media?.title }, "Received invoice message");
-    }
-    return { invoice: invoiceMsg ?? null, firstMsgText };
-  } catch (err) {
-    logger.error({ err }, "getInvoiceFromPremiumBot error");
+  const msg = await msgPromise;
+  if (!msg) {
+    logger.warn({ botUsername }, "No response from PremiumBot after /start");
     return { invoice: null, firstMsgText: null };
   }
+
+  // Check if the message itself is an invoice
+  const mediaType = msg.media?.className ?? "";
+  if (mediaType === "MessageMediaInvoice") {
+    logger.info({ botUsername, title: msg.media?.title }, "Received invoice message from PremiumBot");
+    return { invoice: msg, firstMsgText: null };
+  }
+
+  // Not an invoice — capture text (may be "already active" or a welcome/loading msg)
+  const firstMsgText: string = (msg.text ?? msg.message ?? "").trim();
+  logger.info({ botUsername, mediaType, text: firstMsgText.slice(0, 120) }, "First message is not invoice — waiting for follow-up invoice");
+
+  const invoiceMsg = await waitForBotMsg(
+    client,
+    botUsername,
+    (m) => m.media?.className === "MessageMediaInvoice",
+    20000,
+  );
+  if (!invoiceMsg) {
+    logger.warn({ botUsername, firstMsgText: firstMsgText.slice(0, 120) }, "No invoice message received from PremiumBot");
+  } else {
+    logger.info({ botUsername, title: invoiceMsg.media?.title }, "Received invoice message");
+  }
+  return { invoice: invoiceMsg ?? null, firstMsgText };
+}
+
+export async function getInvoiceFromPremiumBot(
+  client: TelegramClient,
+  botUsername: string,
+  maxAttempts = 2,
+): Promise<{ invoice: any | null; firstMsgText: string | null }> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const result = await _getInvoiceFromPremiumBotOnce(client, botUsername);
+      if (result.invoice || result.firstMsgText !== null) {
+        // Got either an invoice or a meaningful first message — return immediately
+        return result;
+      }
+      // Pure timeout (null, null) — retry if attempts remain
+      if (attempt < maxAttempts - 1) {
+        logger.warn({ botUsername, attempt: attempt + 1 }, "getInvoiceFromPremiumBot: pure timeout — retrying");
+        await delay(3000);
+      }
+    } catch (err) {
+      logger.error({ err, attempt: attempt + 1 }, "getInvoiceFromPremiumBot attempt error");
+      if (attempt < maxAttempts - 1) await delay(3000);
+    }
+  }
+  return { invoice: null, firstMsgText: null };
 }
 
 // ── Step 2: Accept terms (click inline button if present) ─────────────────────
