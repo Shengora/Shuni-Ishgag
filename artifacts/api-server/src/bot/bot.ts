@@ -93,16 +93,20 @@ export function createBot() {
   {
     const rawSA = process.env.SUPER_ADMIN_ID ?? "";
     const saIds = rawSA.split(",").map((s) => Number(s.trim())).filter(Boolean);
-    setOnProxyExhausted(async () => {
-      for (const id of saIds) {
-        await bot.api.sendMessage(
-          id,
-          `⚠️ <b>Proksi IP lar to'ldi!</b>\n\n` +
-          `Barcha IP lar limitga yetdi — Webshare API ga o'tildi.\n\n` +
+    setOnProxyExhausted(async (reason) => {
+      const msg = reason === "cooldown"
+        ? `⚠️ <b>Proksi IP lar vaqtincha blokda!</b>\n\n` +
+          `IP lar mavjud, lekin hozir hammasi cooldownda (30 daqiqa).\n` +
+          `Webshare API ga o'tildi.\n\n` +
+          `🧹 Tez hal qilish:\n` +
+          `/superadmin → 🌐 Proksi IP → 🧹 Cooldownlarni tozalash\n\n` +
+          `💡 Cooldown sababi: Smart Glocal tokenizatsiya sahifasida karta rad etildi (proxy muammosi). Bank tomonidan rad etilgan to'lovlar proxy ga ta'sir qilmaydi.`
+        : `⚠️ <b>Proksi IP lar limitga yetdi!</b>\n\n` +
+          `Barcha IP larning ishlatilish soni <b>maksimumga</b> yetdi — Webshare API ga o'tildi.\n\n` +
           `🔄 Davom ettirish uchun:\n` +
-          `/superadmin → 🌐 Proksi IP → 🔄 Hammasini qayta boshlash`,
-          { parse_mode: "HTML" },
-        ).catch(() => {});
+          `/superadmin → 🌐 Proksi IP → 🔄 Hammasini qayta boshlash`;
+      for (const id of saIds) {
+        await bot.api.sendMessage(id, msg, { parse_mode: "HTML" }).catch(() => {});
       }
     });
   }

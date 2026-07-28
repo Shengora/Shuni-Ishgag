@@ -78,9 +78,12 @@ function getSystemChromiumPath(): string | undefined {
 }
 
 // ── Proxy exhaustion callback — bot.ts registers this to notify super admin ───
-let _onProxyExhausted: (() => Promise<void>) | undefined;
+// `reason`:
+//   "exhausted"  — all active IPs have reached usedCount >= maxUses
+//   "cooldown"   — IPs exist with uses left but are all on temporary cooldown/in-flight
+let _onProxyExhausted: ((reason: "exhausted" | "cooldown") => Promise<void>) | undefined;
 let _lastProxyExhaustedNotifyMs = 0;
-export function setOnProxyExhausted(cb: () => Promise<void>): void {
+export function setOnProxyExhausted(cb: (reason: "exhausted" | "cooldown") => Promise<void>): void {
   _onProxyExhausted = cb;
 }
 
@@ -224,19 +227,35 @@ async function getProxyConfig(): Promise<ProxyConfig | undefined> {
       return cfg;
     }
 
-    // Check if there are active IPs at all — if yes, they're all exhausted
-    const anyActive = await db
-      .select({ id: proxyIps.id })
-      .from(proxyIps)
-      .where(eq(proxyIps.isActive, true))
-      .limit(1);
-    if (anyActive.length > 0) {
-      logger.warn({ maxUses }, "All DB proxy IPs exhausted — falling back to Webshare");
-      // Debounce: notify at most once per 60 s to prevent spam when many flows run concurrently
-      const now = Date.now();
+    // Distinguish WHY no usable row was found so the operator gets the right message.
+    // `rows` already filtered usedCount < maxUses. If rows were found but none passed
+    // the cooldown/in-flight check, the IPs aren't exhausted — they're temporarily
+    // blocked. Only fire the "exhausted" notification when all active IPs have
+    // genuinely hit their usage limit.
+    const now = Date.now();
+    if (rows.length > 0) {
+      // IPs with uses left exist — blocked by cooldown or in-flight only (temporary)
+      const cooldownCount = rows.filter((r) => isProxyIpOnCooldown(r.id)).length;
+      const inFlightCount = rows.filter((r) => _proxyInFlight.has(r.id)).length;
+      logger.warn({ maxUses, cooldownCount, inFlightCount },
+        "All available DB proxy IPs are on cooldown/in-flight — falling back to Webshare");
       if (_onProxyExhausted && now - _lastProxyExhaustedNotifyMs > 60_000) {
         _lastProxyExhaustedNotifyMs = now;
-        _onProxyExhausted().catch(() => {});
+        _onProxyExhausted("cooldown").catch(() => {});
+      }
+    } else {
+      // rows was empty → all active IPs (if any) have usedCount >= maxUses
+      const anyActive = await db
+        .select({ id: proxyIps.id })
+        .from(proxyIps)
+        .where(eq(proxyIps.isActive, true))
+        .limit(1);
+      if (anyActive.length > 0) {
+        logger.warn({ maxUses }, "All DB proxy IPs exhausted (usage limit reached) — falling back to Webshare");
+        if (_onProxyExhausted && now - _lastProxyExhaustedNotifyMs > 60_000) {
+          _lastProxyExhaustedNotifyMs = now;
+          _onProxyExhausted("exhausted").catch(() => {});
+        }
       }
     }
   } catch (err) {

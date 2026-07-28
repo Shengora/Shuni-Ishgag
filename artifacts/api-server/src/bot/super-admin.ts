@@ -1300,25 +1300,33 @@ export function registerSuperAdminCommands(bot: Bot): void {
     const now = Date.now();
 
     const list = shown.map((r, i) => {
-      const full      = r.isActive && r.usedCount >= maxUses;
+      const full       = r.isActive && r.usedCount >= maxUses;
       const onCooldown = cooldowns.has(r.id);
-      const flying_   = inFlight.has(r.id);
-      let status: string;
-      if (!r.isActive)   status = "🚫";
-      else if (flying_)  status = "⚡"; // in-flight: actively being used right now
-      else if (onCooldown) status = "❄️"; // on post-decline cooldown
-      else if (full)     status = "🔴";  // usage exhausted
-      else if (r.usedCount === 0) status = "🟢"; // fresh
-      else               status = "🟡"; // partially used
+      const flying_    = inFlight.has(r.id);
+      let badge: string;
+      if (!r.isActive)    badge = "🚫";
+      else if (flying_)   badge = "⚡";
+      else if (onCooldown) badge = "❄️";
+      else if (full)      badge = "🔴";
+      else if (r.usedCount === 0) badge = "🟢";
+      else                badge = "🟡";
 
-      let extra = ` — ${r.usedCount}/${maxUses}`;
-      if (flying_) extra += " <i>(ishlatilmoqda)</i>";
-      else if (onCooldown) {
-        const secsLeft = Math.ceil((cooldowns.get(r.id)! - now) / 1000);
-        const minsLeft = Math.ceil(secsLeft / 60);
-        extra += ` <i>(cooldown: ${minsLeft} min)</i>`;
+      // Usage: "ishlatildi X/maxUses — Y ta qoldi"
+      const left = Math.max(0, maxUses - r.usedCount);
+      let usage: string;
+      if (!r.isActive) {
+        usage = `o'chirilgan`;
+      } else if (flying_) {
+        usage = `${r.usedCount}/${maxUses} — <b>${left} ta qoldi</b> ⚡ishlatilmoqda`;
+      } else if (onCooldown) {
+        const minsLeft = Math.ceil((cooldowns.get(r.id)! - now) / 60_000);
+        usage = `${r.usedCount}/${maxUses} — <b>${left} ta qoldi</b> ❄️${minsLeft} min`;
+      } else if (full) {
+        usage = `${r.usedCount}/${maxUses} — <b>tugadi</b>`;
+      } else {
+        usage = `${r.usedCount}/${maxUses} — <b>${left} ta qoldi</b>`;
       }
-      return `${i + 1}. ${status} <code>${r.server}</code>${extra}`;
+      return `${i + 1}. ${badge} <code>${r.server}</code>\n    ${usage}`;
     });
 
     const cooldownLine = cooling > 0
