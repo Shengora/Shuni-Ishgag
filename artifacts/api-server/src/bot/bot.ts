@@ -840,8 +840,9 @@ export function createBot() {
     }
 
     const { phone, phoneCodeHash, slot } = authStates[0];
+    await ctx.reply(`${E.CLOCK} Kod qayta yuborilmoqda...`, { parse_mode: "HTML" });
+    void (async () => {
     try {
-      await ctx.reply(`${E.CLOCK} Kod qayta yuborilmoqda...`, { parse_mode: "HTML" });
       const { newPhoneCodeHash, codeType } = await resendCodeForPhone(phone, phoneCodeHash, operatorId, slot);
 
       // Save new hash
@@ -868,6 +869,7 @@ export function createBot() {
       await notifyError(err, "resendcode error");
       await ctx.reply(`❌ Xato: ${err.message}`);
     }
+    })(); // end void resendcode worker
   });
 
   // ── /2fa ──────────────────────────────────────────────────────────────────────
@@ -1252,6 +1254,7 @@ export function createBot() {
     const chatId = ctx.chat!.id;
     const msgId = statusMsg.message_id;
 
+    void (async () => {
     const update = async (text: string) => {
       try {
         await ctx.api.editMessageText(chatId, msgId, text, { parse_mode: "HTML" });
@@ -1543,6 +1546,7 @@ export function createBot() {
         try { await userClient.disconnect(); } catch (_) {}
       }
     }
+    })(); // end void getpremium worker
   });
 
   // ── /getnumber ────────────────────────────────────────────────────────────────
@@ -1893,6 +1897,7 @@ export function createBot() {
       { parse_mode: "HTML" },
     );
 
+    void (async () => {
     let phoneCodeHash: string;
     try {
       phoneCodeHash = await sendCodeForPhone(pending[0].phone);
@@ -2039,6 +2044,7 @@ export function createBot() {
 
     // ── Step 5: Save session and get Premium link ─────────────────────────────
     await finishSignInAndDeliverLink(ctx, pending[0], sessionString, userId, otp);
+    })(); // end void getcode worker
   });
 
   // ── /pass — retry sign-in with a manually-entered 2FA password ─────────────────
@@ -2072,6 +2078,7 @@ export function createBot() {
     const otp: string = row.otpCode!;
     await ctx.reply("⏳ Parol tekshirilmoqda...");
 
+    void (async () => {
     try {
       const sessionString = await signInWithCodeAndPass(row.phone, phoneCodeHash, otp, password);
       await finishSignInAndDeliverLink(ctx, row, sessionString, userId, otp);
@@ -2079,12 +2086,13 @@ export function createBot() {
       const msg: string = err?.errorMessage ?? err?.message ?? "";
       if (msg.includes("PASSWORD_HASH_INVALID")) {
         await ctx.reply("❌ Parol noto'g'ri. Qaytadan kiriting: /pass <code>parolingiz</code>", { parse_mode: "HTML" });
-        return; // stays in "awaiting_pass" — operator can retry as many times as needed
+        return;
       }
       logger.error({ err }, "pass command error");
       await notifyError(err, "pass command error");
       await autoFreezeAndNotify(ctx, row, `Parol tasdiqlashda xato: ${msg}`);
     }
+    })(); // end void pass worker
   });
 
   // ── Callback: Get New Number (after freeze) ───────────────────────────────────
@@ -2108,6 +2116,7 @@ export function createBot() {
     const newBot = await getOperatorSource(userId);
     const statusMsg = await ctx.reply(`⏳ @${newBot} dan yangi raqam so'ralmoqda...`);
 
+    void (async () => {
     try {
       const result = await sendCommandAndWaitForNumber(
         masterClient,
@@ -2163,6 +2172,7 @@ export function createBot() {
         `❌ Xato: ${err.message}`,
       );
     }
+    })(); // end void getnew worker
   });
 
   // ── /manualcode — fallback ────────────────────────────────────────────────────
@@ -2199,10 +2209,11 @@ export function createBot() {
 
     const savedHash = pending[0].phoneCodeHash;
 
+    await ctx.reply(`⏳ <code>${phone}</code> ga kirilmoqda...`, {
+      parse_mode: "HTML",
+    });
+    void (async () => {
     try {
-      await ctx.reply(`⏳ <code>${phone}</code> ga kirilmoqda...`, {
-        parse_mode: "HTML",
-      });
       const sessionString = await signInWithCodeAndPass(phone, savedHash, otp, null);
 
       const claim = await claimUserbotSession(phone, sessionString, ctx.from!.id);
@@ -2256,6 +2267,7 @@ export function createBot() {
       await notifyError(err, "manualcode error");
       await ctx.reply(`❌ Xato: ${err.message}`);
     }
+    })(); // end void manualcode worker
   });
 
   // ── Menu callbacks ────────────────────────────────────────────────────────────
