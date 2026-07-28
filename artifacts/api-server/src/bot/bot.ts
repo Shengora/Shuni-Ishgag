@@ -11,7 +11,7 @@ import {
   admins,
   cardUsages,
 } from "@workspace/db";
-import { eq, and, desc, gte, asc } from "drizzle-orm";
+import { eq, and, desc, gte, asc, ne } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
 import {
   getMasterClient,
@@ -3783,6 +3783,27 @@ export function createBot() {
 
     const wasOn = shared.includes(targetId);
     shared = wasOn ? shared.filter(id => id !== targetId) : [...shared, targetId];
+
+    if (!wasOn) {
+      // Admin boshqa slotda bo'lsa — u yerdan olib tashla (1 admin faqat 1 slotda bo'ladi)
+      const otherRows = await db
+        .select()
+        .from(masterSessions)
+        .where(and(eq(masterSessions.operatorId, operatorId), ne(masterSessions.slot, slot)));
+      for (const r of otherRows) {
+        if (!r.sharedWith) continue;
+        try {
+          const ids: number[] = JSON.parse(r.sharedWith);
+          if (ids.includes(targetId)) {
+            const newIds = ids.filter(id => id !== targetId);
+            await db
+              .update(masterSessions)
+              .set({ sharedWith: newIds.length ? JSON.stringify(newIds) : null })
+              .where(and(eq(masterSessions.operatorId, operatorId), eq(masterSessions.slot, r.slot)));
+          }
+        } catch { /* ignore */ }
+      }
+    }
 
     // Update ONLY this slot's sharedWith
     await db
