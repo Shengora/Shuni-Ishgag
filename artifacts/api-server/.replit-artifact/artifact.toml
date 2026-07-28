@@ -21,8 +21,8 @@ args = ["pnpm", "--filter", "@workspace/api-server", "run", "build"]
 NODE_ENV = "production"
 
 [services.production.run]
-# we don't run through pnpm to make startup faster in production
-args = ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
+# Startup script installs Playwright Chromium (idempotent) then starts the server.
+args = ["sh", "artifacts/api-server/start-prod.sh"]
 
 [services.production.run.env]
 PORT = "8080"
