@@ -358,6 +358,37 @@ function isProxyIpOnCooldown(ipId: number): boolean {
 }
 
 /**
+ * Returns a read-only snapshot of the current in-memory proxy state so the
+ * super-admin panel can display pool health without needing server logs.
+ *   - `inFlight`  — set of proxyIps.id currently reserved for an active session
+ *   - `cooldowns` — map of proxyIps.id → epoch-ms when the cooldown expires
+ *     (stale entries whose expiry has already passed are pruned before returning)
+ */
+export function getProxyRuntimeStatus(): {
+  inFlight: ReadonlySet<number>;
+  cooldowns: ReadonlyMap<number, number>;
+} {
+  // Prune expired cooldown entries before handing the map out
+  const now = Date.now();
+  for (const [id, until] of _proxyCooldownUntil) {
+    if (now >= until) _proxyCooldownUntil.delete(id);
+  }
+  return { inFlight: _proxyInFlight, cooldowns: _proxyCooldownUntil };
+}
+
+/**
+ * Force-clears all in-memory proxy cooldowns.
+ * Returns the number of entries that were cleared.
+ * Does NOT touch the DB (failCount / isActive are unaffected).
+ */
+export function clearAllProxyCooldowns(): number {
+  const count = _proxyCooldownUntil.size;
+  _proxyCooldownUntil.clear();
+  logger.info({ cleared: count }, "All proxy IP cooldowns cleared by super admin");
+  return count;
+}
+
+/**
  * Record a connect failure for a DB proxy IP. Increments failCount atomically;
  * once it reaches PROXY_MAX_FAILURES the proxy is set is_active = false so it
  * stops being picked. A later successful use resets the counter (see

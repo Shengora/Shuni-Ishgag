@@ -13,6 +13,7 @@ import { logger } from "../lib/logger.js";
 import { E, EID } from "../lib/emoji.js";
 import { withTimeout } from "../lib/timeout.js";
 import { notifyError } from "./notify.js";
+import { getProxyRuntimeStatus, clearAllProxyCooldowns } from "./premium.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1282,23 +1283,50 @@ export function registerSuperAdminCommands(bot: Bot): void {
       db.select().from(proxyIps).orderBy(asc(proxyIps.usedCount)),
       getMaxUses(),
     ]);
-    const active   = rows.filter((r) => r.isActive);
+    const { inFlight, cooldowns } = getProxyRuntimeStatus();
+
+    const active    = rows.filter((r) => r.isActive);
     const exhausted = active.filter((r) => r.usedCount >= maxUses).length;
-    const available = active.filter((r) => r.usedCount < maxUses).length;
+    const available = active.filter((r) => r.usedCount < maxUses && !cooldowns.has(r.id) && !inFlight.has(r.id)).length;
     const disabled  = rows.filter((r) => !r.isActive).length;
+    const cooling   = [...cooldowns.keys()].filter((id) => rows.some((r) => r.id === id && r.isActive)).length;
+    const flying    = [...inFlight].filter((id) => rows.some((r) => r.id === id)).length;
 
     // Telegram caps messages at 4096 chars and inline keyboards get unwieldy past
     // a few dozen rows, so cap how many proxies we render in the panel itself.
     const MAX_LIST = 40;
     const shown = rows.slice(0, MAX_LIST);
     const hiddenCount = rows.length - shown.length;
+    const now = Date.now();
 
     const list = shown.map((r, i) => {
-      const full   = r.isActive && r.usedCount >= maxUses;
-      const status = !r.isActive ? "🚫" : full ? "🔴" : r.usedCount === 0 ? "🟢" : "🟡";
-      const last   = r.lastUsedAt ? ` | oxirgi: ${fmt(r.lastUsedAt)}` : "";
-      return `${i + 1}. ${status} <code>${r.server}</code> — ${r.usedCount}/${maxUses}${last}`;
+      const full      = r.isActive && r.usedCount >= maxUses;
+      const onCooldown = cooldowns.has(r.id);
+      const flying_   = inFlight.has(r.id);
+      let status: string;
+      if (!r.isActive)   status = "🚫";
+      else if (flying_)  status = "⚡"; // in-flight: actively being used right now
+      else if (onCooldown) status = "❄️"; // on post-decline cooldown
+      else if (full)     status = "🔴";  // usage exhausted
+      else if (r.usedCount === 0) status = "🟢"; // fresh
+      else               status = "🟡"; // partially used
+
+      let extra = ` — ${r.usedCount}/${maxUses}`;
+      if (flying_) extra += " <i>(ishlatilmoqda)</i>";
+      else if (onCooldown) {
+        const secsLeft = Math.ceil((cooldowns.get(r.id)! - now) / 1000);
+        const minsLeft = Math.ceil(secsLeft / 60);
+        extra += ` <i>(cooldown: ${minsLeft} min)</i>`;
+      }
+      return `${i + 1}. ${status} <code>${r.server}</code>${extra}`;
     });
+
+    const cooldownLine = cooling > 0
+      ? `❄️ Cooldownda: <b>${cooling}</b> ta\n`
+      : "";
+    const inFlightLine = flying > 0
+      ? `⚡ Ishlatilmoqda: <b>${flying}</b> ta\n`
+      : "";
 
     const text =
       `🌐 <b>Proksi IP boshqaruv</b>\n` +
@@ -1306,7 +1334,9 @@ export function registerSuperAdminCommands(bot: Bot): void {
       `📊 Jami: <b>${rows.length}</b> ta` +
       (disabled ? ` (${disabled} ta o'chirilgan)` : "") + `\n` +
       `🟢 Bo'sh: <b>${available}</b> ta\n` +
-      `🔴 To'lgan: <b>${exhausted}</b> ta\n\n` +
+      `🔴 To'lgan: <b>${exhausted}</b> ta\n` +
+      cooldownLine +
+      inFlightLine + `\n` +
       (list.length
         ? `<b>IP ro'yxati:</b>\n${list.join("\n")}` +
           (hiddenCount > 0 ? `\n\n… va yana <b>${hiddenCount}</b> ta (ro'yxat qisqartirildi)` : "")
@@ -1316,10 +1346,21 @@ export function registerSuperAdminCommands(bot: Bot): void {
     if (active.length > 0) {
       kb.text("🔄 Hammasini qayta boshlash", "sa_proxy_reset").row();
     }
+    if (cooling > 0) {
+      kb.text(`🧹 Cooldownlarni tozalash (${cooling})`, "sa_proxy_clear_cooldowns").row();
+    }
     kb.text(`⚙️ Limit: ${maxUses} ta`, "sa_proxy_limit").row();
     for (const r of shown) {
-      const full  = r.isActive && r.usedCount >= maxUses;
-      const badge = !r.isActive ? "🚫" : full ? "🔴" : r.usedCount === 0 ? "🟢" : "🟡";
+      const full      = r.isActive && r.usedCount >= maxUses;
+      const onCooldown = cooldowns.has(r.id);
+      const flying_   = inFlight.has(r.id);
+      let badge: string;
+      if (!r.isActive)   badge = "🚫";
+      else if (flying_)  badge = "⚡";
+      else if (onCooldown) badge = "❄️";
+      else if (full)     badge = "🔴";
+      else if (r.usedCount === 0) badge = "🟢";
+      else               badge = "🟡";
       kb.text(`${badge} ${r.server}`, `sa_proxy_detail:${r.id}`).row();
     }
     kb.text("➕ IP qo'shish", "sa_proxy_add").row();
@@ -1463,6 +1504,19 @@ export function registerSuperAdminCommands(bot: Bot): void {
     } catch (_) {}
   });
 
+  // ── sa_proxy_clear_cooldowns — force-clear all in-memory cooldowns ────────
+  bot.callbackQuery("sa_proxy_clear_cooldowns", requireSA, async (ctx) => {
+    const cleared = clearAllProxyCooldowns();
+    await ctx.answerCallbackQuery(`🧹 ${cleared} ta cooldown tozalandi`);
+    const { text, kb } = await buildProxyPanel();
+    try {
+      await ctx.editMessageText(
+        `✅ <b>${cleared} ta cooldown tozalandi!</b>\n\nIP lar endi tanlana oladi.\n\n` + text,
+        { parse_mode: "HTML", reply_markup: kb },
+      );
+    } catch (_) {}
+  });
+
   // ── sa_proxy_detail:<id> ──────────────────────────────────────────────────
   bot.callbackQuery(/^sa_proxy_detail:(\d+)$/, requireSA, async (ctx) => {
     await ctx.answerCallbackQuery();
@@ -1472,13 +1526,31 @@ export function registerSuperAdminCommands(bot: Bot): void {
       await ctx.editMessageText("❌ IP topilmadi.", { reply_markup: new InlineKeyboard().text("◀️ Orqaga", "sa_proxy") });
       return;
     }
-    const status = !row.isActive ? "🚫 O'chirilgan" : row.usedCount === 0 ? "🟢 Yangi" : "🟡 Ishlatilgan";
+    const { inFlight, cooldowns } = getProxyRuntimeStatus();
+    const onCooldown = cooldowns.has(id);
+    const flying     = inFlight.has(id);
+    let status: string;
+    if (!row.isActive)   status = "🚫 O'chirilgan";
+    else if (flying)     status = "⚡ Hozir ishlatilmoqda";
+    else if (onCooldown) {
+      const minsLeft = Math.ceil((cooldowns.get(id)! - Date.now()) / 60_000);
+      status = `❄️ Cooldownda (${minsLeft} min qoldi)`;
+    }
+    else if (row.usedCount === 0) status = "🟢 Yangi";
+    else status = "🟡 Ishlatilgan";
+
+    const failLine = row.failCount > 0
+      ? `❌ Ulanish xatolari: <b>${row.failCount}</b>` +
+        (row.lastFailedAt ? ` (oxirgi: ${fmt(row.lastFailedAt)})` : "") + `\n`
+      : "";
+
     const text =
       `🌐 <b>Proksi IP tafsiloti</b>\n\n` +
       `🖥 Server: <code>${row.server}</code>\n` +
       `👤 Login: <code>${row.username ?? "yo'q"}</code>\n` +
       `📊 Ishlatildi: <b>${row.usedCount}</b> marta\n` +
       `⏰ Oxirgi: ${row.lastUsedAt ? fmt(row.lastUsedAt) : "hali yo'q"}\n` +
+      failLine +
       `Holat: ${status}\n` +
       `📅 Qo'shilgan: ${fmt(row.addedAt)}`;
 
@@ -1793,6 +1865,79 @@ export function registerSuperAdminCommands(bot: Bot): void {
         reply_markup: new InlineKeyboard().text("SA Panel", "sa_main").icon(EID.SHIELD).primary(),
       },
     ).catch(() => {});
+  });
+
+  // ── /proxystatus — proxy pool health snapshot (super admin only) ─────────
+  bot.command("proxystatus", requireSA, async (ctx) => {
+    const [rows, maxUses] = await Promise.all([
+      db.select().from(proxyIps).orderBy(asc(proxyIps.usedCount)),
+      getMaxUses(),
+    ]);
+    const { inFlight, cooldowns } = getProxyRuntimeStatus();
+    const now = Date.now();
+
+    const active    = rows.filter((r) => r.isActive);
+    const disabled  = rows.filter((r) => !r.isActive).length;
+    const exhausted = active.filter((r) => r.usedCount >= maxUses).length;
+    const cooling   = active.filter((r) => cooldowns.has(r.id)).length;
+    const flying    = active.filter((r) => inFlight.has(r.id)).length;
+    const available = active.filter(
+      (r) => r.usedCount < maxUses && !cooldowns.has(r.id) && !inFlight.has(r.id),
+    ).length;
+
+    // Cooldown detail lines
+    const cooldownLines = active
+      .filter((r) => cooldowns.has(r.id))
+      .map((r) => {
+        const minsLeft = Math.ceil((cooldowns.get(r.id)! - now) / 60_000);
+        return `  ❄️ <code>${r.server}</code> — ${minsLeft} min qoldi`;
+      });
+
+    // In-flight detail lines
+    const inFlightLines = active
+      .filter((r) => inFlight.has(r.id))
+      .map((r) => `  ⚡ <code>${r.server}</code>`);
+
+    // Available IPs with remaining uses
+    const availLines = active
+      .filter((r) => r.usedCount < maxUses && !cooldowns.has(r.id) && !inFlight.has(r.id))
+      .slice(0, 15)
+      .map((r) => {
+        const left = maxUses - r.usedCount;
+        return `  🟢 <code>${r.server}</code> — ${left} ta qoldi`;
+      });
+
+    let text =
+      `🌐 <b>Proksi pool holati</b>\n` +
+      `⚙️ Har IP limiti: <b>${maxUses} ta</b>\n\n` +
+      `📊 Jami: <b>${rows.length}</b> ta` +
+      (disabled ? ` (${disabled} ta o'chirilgan)` : "") + `\n` +
+      `🟢 Bo'sh: <b>${available}</b> ta\n` +
+      `🔴 To'lgan: <b>${exhausted}</b> ta\n` +
+      `❄️ Cooldownda: <b>${cooling}</b> ta\n` +
+      `⚡ Ishlatilmoqda: <b>${flying}</b> ta\n`;
+
+    if (inFlightLines.length) {
+      text += `\n<b>Hozir faol:</b>\n${inFlightLines.join("\n")}\n`;
+    }
+    if (cooldownLines.length) {
+      text += `\n<b>Cooldownlar:</b>\n${cooldownLines.join("\n")}\n`;
+    }
+    if (availLines.length) {
+      text += `\n<b>Mavjud IP lar:</b>\n${availLines.join("\n")}`;
+      if (available > 15) text += `\n  … va yana ${available - 15} ta`;
+    } else if (!cooling && !flying) {
+      text += `\n⚠️ <b>Hech qanday bo'sh IP yo'q!</b>`;
+    }
+
+    const kb = new InlineKeyboard();
+    if (cooling > 0) {
+      kb.text(`🧹 Cooldownlarni tozalash (${cooling})`, "sa_proxy_clear_cooldowns").row();
+    }
+    kb.text("🌐 Proksi boshqaruv", "sa_proxy").row();
+    kb.text("◀️ SA Panel", "sa_main");
+
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
   });
 
   // ── /globalstats — overall stats for current period ──────────────────────
