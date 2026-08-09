@@ -287,8 +287,8 @@ const AI_TIMEOUT_MS = 45_000;
 async function runAiWithFallback(prompt: string): Promise<string> {
   const errors: string[] = [];
 
-  const anthropicBase = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
-  const anthropicKey  = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY;
+  const anthropicBase = undefined;
+  const anthropicKey  = undefined;
   if (anthropicBase && anthropicKey) {
     try {
       const client = new Anthropic({ baseURL: anthropicBase, apiKey: anthropicKey });
@@ -310,8 +310,8 @@ async function runAiWithFallback(prompt: string): Promise<string> {
     }
   }
 
-  const openaiBase = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
-  const openaiKey  = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
+  const openaiBase = undefined;
+  const openaiKey  = undefined;
   if (openaiBase && openaiKey) {
     try {
       const client = new OpenAI({ baseURL: openaiBase, apiKey: openaiKey });
@@ -333,8 +333,8 @@ async function runAiWithFallback(prompt: string): Promise<string> {
     }
   }
 
-  const geminiBase = process.env.AI_INTEGRATIONS_GEMINI_BASE_URL;
-  const geminiKey  = process.env.AI_INTEGRATIONS_GEMINI_API_KEY;
+  const geminiBase = undefined;
+  const geminiKey  = undefined;
   if (geminiBase && geminiKey) {
     try {
       const ai = new GoogleGenAI({ apiKey: geminiKey, httpOptions: { apiVersion: "", baseUrl: geminiBase } });
@@ -360,9 +360,9 @@ async function runAiWithFallback(prompt: string): Promise<string> {
 }
 
 async function analyzeStatsWithAI(periodId: number): Promise<string> {
-  const hasAnthropic = !!(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL && process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY);
-  const hasOpenAI    = !!(process.env.AI_INTEGRATIONS_OPENAI_BASE_URL && process.env.AI_INTEGRATIONS_OPENAI_API_KEY);
-  const hasGemini    = !!(process.env.AI_INTEGRATIONS_GEMINI_BASE_URL && process.env.AI_INTEGRATIONS_GEMINI_API_KEY);
+  const hasAnthropic = !!(false);
+  const hasOpenAI    = !!(false);
+  const hasGemini    = !!(false);
   if (!hasAnthropic && !hasOpenAI && !hasGemini) {
     return "❌ AI tahlil uchun hech qanday AI integratsiya sozlanmagan.";
   }
