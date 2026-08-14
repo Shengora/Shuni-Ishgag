@@ -1,11 +1,6 @@
-import { fileURLToPath } from "url";
-import path from "path";
-import dotenv from "dotenv";
+import "./env.js";
 import { run, type RunnerHandle } from "@grammyjs/runner";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.join(__dirname, "../.env") });
 import app from "./app.js";
 import { logger } from "./lib/logger.js";
 import { createBot } from "./bot/bot.js";
