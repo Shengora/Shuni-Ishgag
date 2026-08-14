@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { run, type RunnerHandle } from "@grammyjs/runner";
 import app from "./app.js";
 import { logger } from "./lib/logger.js";
