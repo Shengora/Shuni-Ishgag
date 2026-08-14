@@ -210,7 +210,7 @@ importers:
         specifier: ^10.5.0
         version: 10.5.0
       playwright:
-        specifier: ^1.61.1
+        specifier: ^1.62.0
         version: 1.62.0
       telegram:
         specifier: ^2.26.22
