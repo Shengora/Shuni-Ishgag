@@ -1065,31 +1065,59 @@ export function registerSuperAdminCommands(bot: Bot): void {
       awaitingSAInput.delete(uid);
 
       const input = ctx.message.text.trim();
-      const parts = input.split(":");
-      if (parts.length < 2 || parts.length === 3) {
+      const lines = input.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+
+      const validProxies: { server: string; username: string | null; password: string | null; isActive: boolean }[] = [];
+      const invalidLines: string[] = [];
+      const duplicateServers: string[] = [];
+
+      for (const line of lines) {
+        const parts = line.split(":");
+        if (parts.length < 2 || parts.length === 3) {
+          invalidLines.push(line);
+          continue;
+        }
+        const server   = `${parts[0]}:${parts[1]}`;
+        const username = parts.length >= 4 ? parts[2] : null;
+        const password = parts.length >= 4 ? parts.slice(3).join(":") : null;
+        validProxies.push({ server, username, password, isActive: true });
+      }
+
+      if (validProxies.length === 0 && invalidLines.length > 0) {
         await ctx.reply(
-          `❌ Noto'g'ri format.\n\nTo'g'ri:\n<code>host:port</code>\n<code>host:port:user:pass</code>`,
+          `❌ Kiritilgan barcha manzillar noto'g'ri formatda.\n\nTo'g'ri format:\n<code>host:port</code>\n<code>host:port:user:pass</code>`,
           { parse_mode: "HTML" },
         );
         return;
       }
-      const server   = `${parts[0]}:${parts[1]}`;
-      const username = parts.length >= 4 ? parts[2] : null;
-      const password = parts.length >= 4 ? parts.slice(3).join(":") : null;
+
       try {
         await ctx.api.deleteMessage(ctx.chat.id, promptMsgId).catch(() => {});
         await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
-        const existing = await db.select().from(proxyIps).where(eq(proxyIps.server, server)).limit(1);
-        if (existing.length > 0) {
-          await ctx.reply(`⚠️ <code>${server}</code> allaqachon mavjud.`, {
-            parse_mode: "HTML",
-            reply_markup: new InlineKeyboard().text("◀️ Orqaga", "sa_proxy"),
-          });
-          return;
+
+        const insertedCount = { count: 0 };
+        for (const proxy of validProxies) {
+          const existing = await db.select().from(proxyIps).where(eq(proxyIps.server, proxy.server)).limit(1);
+          if (existing.length > 0) {
+            duplicateServers.push(proxy.server);
+            continue;
+          }
+          await db.insert(proxyIps).values(proxy);
+          insertedCount.count++;
         }
-        await db.insert(proxyIps).values({ server, username, password, isActive: true });
+
         const { text, kb } = await buildProxyPanel();
-        await ctx.reply(`✅ <b>${server}</b> qo'shildi!\n\n` + text, { parse_mode: "HTML", reply_markup: kb });
+
+        let replyText = `✅ <b>${insertedCount.count} ta proksi</b> qo'shildi!\n\n`;
+        if (duplicateServers.length > 0) {
+          replyText += `⚠️ <b>${duplicateServers.length} ta</b> proksi allaqachon mavjud (takroriy).\n`;
+        }
+        if (invalidLines.length > 0) {
+          replyText += `❌ <b>${invalidLines.length} ta</b> qatorda format noto'g'ri (e'tiborga olinmadi).\n`;
+        }
+        replyText += `\n` + text;
+
+        await ctx.reply(replyText, { parse_mode: "HTML", reply_markup: kb });
       } catch (err: any) {
         logger.error({ err }, "sa proxy add error");
         await notifyError(err, "sa proxy add error");
@@ -1719,10 +1747,10 @@ export function registerSuperAdminCommands(bot: Bot): void {
     await ctx.answerCallbackQuery();
     const msg = await ctx.reply(
       `➕ <b>Yangi proksi IP qo'shish</b>\n\n` +
-      `Quyidagi formatlardan birida yuboring:\n\n` +
+      `Birdaniga bir nechta IP qo'shishingiz mumkin. Har birini yangi qatorda yuboring:\n\n` +
       `Auth bilan:\n<code>host:port:username:password</code>\n\n` +
       `Auth siz:\n<code>host:port</code>\n\n` +
-      `Misol:\n<code>185.22.154.10:8080:user123:pass456</code>\n<code>185.22.154.10:8080</code>`,
+      `Misol:\n<code>185.22.154.10:8080:user123:pass456</code>\n<code>185.22.154.11:8080</code>`,
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard().text("❌ Bekor qilish", "sa_proxy_add_cancel"),
