@@ -1014,7 +1014,7 @@ async function handle3dsOtpIfNeeded(
           try {
             const btn = page.locator(btnSel).first();
             if (await btn.isVisible({ timeout: 800 }).catch(() => false)) {
-              await btn.click();
+              await btn.click({ timeout: 5000 });
               submitClicked = true;
               logger.info({ btnSel }, "Clicked OTP submit button");
               break;
@@ -1063,11 +1063,11 @@ async function handle3dsOtpIfNeeded(
  *     controlled inputs both rely on.
  */
 async function humanFill(locator: any, text: string): Promise<void> {
-  await locator.click();
+  await locator.click({ timeout: 5000 });
   // Clear existing value the keyboard way so Maskito resets properly
   await locator.press("Control+a");
   await locator.press("Delete");
-  await locator.pressSequentially(text, { delay: 40 });
+  await locator.pressSequentially(text, { delay: 40, timeout: 5000 });
 }
 
 /**
@@ -1232,7 +1232,7 @@ export async function payPremiumViaWebApp(
         // that never settles (e.g. proxy misconfiguration, exhausted resources)
         // must fail fast with a clear, logged reason rather than silently stalling
         // until the much coarser 120s total-flow watchdog eventually kills it.
-        browser = await launchRacingTimeout(serializeLaunch(() => pw.chromium.launch(launchOpts)), "Browser launch");
+        browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch(launchOpts), "Browser launch"));
       } catch (launchErr: any) {
         const msg: string = launchErr?.message ?? "";
         if (!useReplitChromium && /Executable doesn't exist/i.test(msg)) {
@@ -1240,10 +1240,7 @@ export async function payPremiumViaWebApp(
             { err: msg.slice(0, 200) },
             "Default chromium launch failed (browser binary missing) — retrying with channel:'chromium'",
           );
-          browser = await launchRacingTimeout(
-            serializeLaunch(() => pw.chromium.launch({ ...launchOpts, channel: "chromium" })),
-            "Browser launch (chromium channel)",
-          );
+          browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch({ ...launchOpts, channel: "chromium" }), "Browser launch (chromium channel)"));
         } else {
           logger.error({ err: msg.slice(0, 300), useProxy }, "Browser launch failed or timed out");
           throw launchErr;
@@ -1256,6 +1253,7 @@ export async function payPremiumViaWebApp(
         viewport: { width: 390, height: 844 },
       });
       page = await context.newPage();
+
 
       // ── Intercept Smart Glocal tokenization API response ────────────────────
       page.on("response", async (response: any) => {
@@ -1642,7 +1640,7 @@ export async function payPremiumViaWebApp(
       try {
         const el = page.locator(sel).first();
         if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-          await el.click();
+          await el.click({ timeout: 5000 });
           clicked = true;
           logger.info({ sel }, "Clicked pay button");
           break;
@@ -1654,7 +1652,7 @@ export async function payPremiumViaWebApp(
       logger.warn("No pay button matched — trying last visible button");
       const lastBtn = page.locator("button").last();
       if (await lastBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await lastBtn.click();
+        await lastBtn.click({ timeout: 5000 });
         clicked = true;
         logger.info("Clicked last button as fallback");
       }
