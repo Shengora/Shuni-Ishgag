@@ -1065,7 +1065,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       awaitingSAInput.delete(uid);
 
       const input = ctx.message.text.trim();
-      const lines = input.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+      const lines = input.split(/[\s\r\n]+/).map(l => l.trim()).filter(l => l.length > 0);
 
       const validProxies: { server: string; username: string | null; password: string | null; isActive: boolean }[] = [];
       const invalidLines: string[] = [];
