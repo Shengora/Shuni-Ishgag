@@ -1155,21 +1155,21 @@ export async function payPremiumViaWebApp(
   try {
     const pw = await import("playwright");
 
-    // ── Proxy (DB pool → env → Webshare API) ──────────────────────────────────
-    const proxyConfig = await getProxyConfig();
-    // Track for usage increment on success. Cleared if we fall back to a direct
-    // connection, so a proxy that didn't actually work isn't credited a success
-    // (which would otherwise reset its failure counter).
-    let proxyIpId = proxyConfig?.ipId;
-    // Unlike proxyIpId above, this never gets cleared on fallback — it's only
-    // used to release the in-flight reservation taken out in getProxyConfig(),
-    // which must happen regardless of how this attempt turns out.
-    reservedProxyIpId = proxyConfig?.ipId;
+    const MAX_RETRIES = 3;
+    let attempt = 1;
+    let proxyConfig: any;
+    let proxyIpId: number | undefined;
 
-    // ── Inner helper: launch browser + create page + wire interceptors ─────────
-    // Extracted so we can relaunch without proxy when the proxy blocks the site.
-    const launchPage = async (useProxy: boolean): Promise<void> => {
-      const cfg = useProxy ? proxyConfig : undefined;
+    while (attempt <= MAX_RETRIES) {
+      // ── Proxy (DB pool → env → Webshare API) ──────────────────────────────────
+      proxyConfig = await getProxyConfig();
+      proxyIpId = proxyConfig?.ipId;
+      reservedProxyIpId = proxyConfig?.ipId;
+
+      // ── Inner helper: launch browser + create page + wire interceptors ─────────
+      // Always uses the provided proxy.
+      const launchPage = async (): Promise<void> => {
+        const cfg = proxyConfig;
       // Prefer the Nix-installed system chromium (identical on dev + prod,
       // see getSystemChromiumPath). Fall back to
       // REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE (only realized on some dev
@@ -1261,7 +1261,7 @@ export async function payPremiumViaWebApp(
           );
           browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch({ ...launchOpts, channel: "chromium" }), "Browser launch (chromium channel)"));
         } else {
-          logger.error({ err: msg.slice(0, 300), useProxy }, "Browser launch failed or timed out");
+          logger.error({ err: msg.slice(0, 300) }, "Browser launch failed or timed out");
           throw launchErr;
         }
       }
@@ -1372,57 +1372,54 @@ export async function payPremiumViaWebApp(
     };
 
     try {
-      await launchPage(!!proxyConfig);
-    } catch (launchErr: any) {
-      // Browser launch itself timed out/failed (e.g. a dead/unresponsive proxy
-      // wedging chromium's startup). Unlike the goto-level network-error
-      // fallback below, this path previously just aborted the whole flow
-      // without ever penalizing the proxy — so a bad IP kept getting
-      // re-selected forever. Record the failure and retry once without a
-      // proxy before giving up.
-      if (proxyConfig) {
-        logger.warn(
-          { proxyServer: proxyConfig.server, err: (launchErr?.message ?? "").slice(0, 200) },
-          "Browser launch failed with proxy — retrying with direct connection",
-        );
-        if (proxyIpId) await recordProxyIpFailure(proxyIpId).catch(() => {});
-        proxyIpId = undefined; // proxy didn't work — don't credit it a success later
-        try { await browser?.close(); } catch (_) {}
-        browser = null; page = null;
-        await launchPage(false); // direct connection, no proxy
-      } else {
+        await launchPage();
+      } catch (launchErr: any) {
+        if (proxyConfig) {
+          logger.warn(
+            { proxyServer: proxyConfig.server, err: (launchErr?.message ?? "").slice(0, 200) },
+            "Browser launch failed with proxy — retrying with a new proxy"
+          );
+          if (proxyIpId) await recordProxyIpFailure(proxyIpId).catch(() => {});
+          releaseProxyIpReservation(reservedProxyIpId);
+          try { await browser?.close(); } catch (_) {}
+          browser = null; page = null;
+
+          if (attempt < MAX_RETRIES) {
+            attempt++;
+            continue;
+          }
+        }
         throw launchErr;
       }
-    }
 
-    const safeUrl = (() => {
+      const safeUrl = (() => {
       try { const u = new URL(formUrl); return `${u.host}${u.pathname}`; } catch { return "(url parse error)"; }
     })();
     logger.info({ safeUrl }, "Opening payment form in Playwright");
 
     // ── Navigate — if proxy blocks the site, fall back to a direct connection ──
     try {
-      await page.goto(formUrl, { timeout: PLAYWRIGHT_GOTO_TIMEOUT, waitUntil: "domcontentloaded" });
-    } catch (gotoErr: any) {
-      const msg: string = gotoErr?.message ?? "";
-      const isNetErr = /ERR_TIMED_OUT|ERR_CONNECTION_REFUSED|ERR_PROXY_CONNECTION_FAILED|ERR_EMPTY_RESPONSE|ERR_TUNNEL_CONNECTION_FAILED|net::ERR/i.test(msg);
-      if (isNetErr && proxyConfig) {
-        logger.warn(
-          { proxyServer: proxyConfig.server, err: msg.slice(0, 120) },
-          "Proxy network error on goto — retrying with direct connection",
-        );
-        // Record the failure so a persistently dead proxy is auto-retired.
-        if (proxyIpId) await recordProxyIpFailure(proxyIpId).catch(() => {});
-        proxyIpId = undefined; // proxy didn't work — don't credit it a success later
-        try { await browser.close(); } catch (_) {}
-        browser = null; page = null;
-        await launchPage(false); // direct connection, no proxy
         await page.goto(formUrl, { timeout: PLAYWRIGHT_GOTO_TIMEOUT, waitUntil: "domcontentloaded" });
-        logger.info("Direct-connection goto succeeded after proxy failure");
-      } else {
+      } catch (gotoErr: any) {
+        const msg: string = gotoErr?.message ?? "";
+        const isNetErr = /ERR_TIMED_OUT|ERR_CONNECTION_REFUSED|ERR_PROXY_CONNECTION_FAILED|ERR_EMPTY_RESPONSE|ERR_TUNNEL_CONNECTION_FAILED|net::ERR|Timeout \d+ms exceeded/i.test(msg);
+        if (isNetErr && proxyConfig) {
+          logger.warn(
+            { proxyServer: proxyConfig.server, err: msg.slice(0, 120) },
+            "Proxy network error on goto — retrying with a new proxy",
+          );
+          if (proxyIpId) await recordProxyIpFailure(proxyIpId).catch(() => {});
+          releaseProxyIpReservation(reservedProxyIpId);
+          try { await browser?.close(); } catch (_) {}
+          browser = null; page = null;
+
+          if (attempt < MAX_RETRIES) {
+            attempt++;
+            continue;
+          }
+        }
         throw gotoErr;
       }
-    }
 
     // Wait for the card-number input to actually appear in the DOM (the Smart
     // Glocal tokenize page is a React SPA — content arrives after JS runs, so
@@ -1762,7 +1759,8 @@ export async function payPremiumViaWebApp(
     // Ambiguous — allow SendPaymentForm attempt
     logger.warn("Could not capture credentials — will try SendPaymentForm without explicit token");
     return { submitted: true, proxyIpId };
-
+    }
+    throw new Error("Max retries exceeded");
   } catch (err: any) {
     const errorMsg = err?.message || String(err);
     if (watchdogFired) {
