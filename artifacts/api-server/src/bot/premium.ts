@@ -1014,7 +1014,7 @@ async function handle3dsOtpIfNeeded(
           try {
             const btn = page.locator(btnSel).first();
             if (await btn.isVisible({ timeout: 800 }).catch(() => false)) {
-              await btn.click({ timeout: 5000 });
+              await btn.click({ timeout: 15000 });
               submitClicked = true;
               logger.info({ btnSel }, "Clicked OTP submit button");
               break;
@@ -1063,11 +1063,11 @@ async function handle3dsOtpIfNeeded(
  *     controlled inputs both rely on.
  */
 async function humanFill(locator: any, text: string): Promise<void> {
-  await locator.click({ timeout: 5000 });
+  await locator.click({ timeout: 15000 });
   // Clear existing value the keyboard way so Maskito resets properly
   await locator.press("Control+a");
   await locator.press("Delete");
-  await locator.pressSequentially(text, { delay: 40, timeout: 5000 });
+  await locator.pressSequentially(text, { delay: 40, timeout: 15000 });
 }
 
 /**
@@ -1640,7 +1640,7 @@ export async function payPremiumViaWebApp(
       try {
         const el = page.locator(sel).first();
         if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-          await el.click({ timeout: 5000 });
+          await el.click({ timeout: 15000 });
           clicked = true;
           logger.info({ sel }, "Clicked pay button");
           break;
@@ -1652,7 +1652,7 @@ export async function payPremiumViaWebApp(
       logger.warn("No pay button matched — trying last visible button");
       const lastBtn = page.locator("button").last();
       if (await lastBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await lastBtn.click({ timeout: 5000 });
+        await lastBtn.click({ timeout: 15000 });
         clicked = true;
         logger.info("Clicked last button as fallback");
       }
