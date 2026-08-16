@@ -598,11 +598,12 @@ async function saveFailureScreenshot(page: any, label: string): Promise<void> {
   try {
     const ts = Date.now();
     const filePath = join(tmpdir(), `premium-fail-${label}-${ts}.png`);
-    const screenshotBuf: Buffer = await page.screenshot({ fullPage: true });
+    // Pass timeout explicitly so a hung page doesn't block forever
+    const screenshotBuf: Buffer = await page.screenshot({ fullPage: true, timeout: 5000 });
     await writeFile(filePath, screenshotBuf);
     logger.warn({ screenshotPath: filePath }, "Saved failure screenshot");
-  } catch (err) {
-    logger.warn({ err }, "Could not save failure screenshot");
+  } catch (err: any) {
+    logger.warn({ err: err?.message || err }, "Could not save failure screenshot");
   }
 }
 
@@ -1410,7 +1411,7 @@ export async function payPremiumViaWebApp(
     // Wait for the card-number input to actually appear in the DOM (the Smart
     // Glocal tokenize page is a React SPA — content arrives after JS runs, so
     // a fixed 3 s sleep often races against slow proxy connections or cold
-    // browser starts).  Fall back to a 10 s sleep if the selector never shows.
+    // browser starts).  Fall back to a 15 s sleep if the selector never shows.
     const CARD_READY_SELECTORS = [
       'input[autocomplete="cc-number"]',
       'input[name="paymentDetails.card.number"]',
@@ -1419,15 +1420,15 @@ export async function payPremiumViaWebApp(
     let formReady = false;
     for (const readySel of CARD_READY_SELECTORS) {
       try {
-        await page.waitForSelector(readySel, { state: "visible", timeout: 12000 });
+        await page.waitForSelector(readySel, { state: "visible", timeout: 20000 });
         formReady = true;
         logger.info({ readySel }, "Card form ready (selector visible)");
         break;
       } catch (_) {}
     }
     if (!formReady) {
-      logger.warn("Card form selector never appeared — waiting 10 s as fallback");
-      await page.waitForTimeout(10000);
+      logger.warn("Card form selector never appeared — waiting 15 s as fallback");
+      await page.waitForTimeout(15000);
     }
 
     // Normalise expiry to expMonth / rawYear regardless of storage format.
@@ -1454,7 +1455,9 @@ export async function payPremiumViaWebApp(
     const expDigits = `${expMonth.padStart(2, "0")}${rawYear.padStart(2, "0")}`;
 
     // Save pre-fill screenshot for diagnosis (before any sensitive data is entered)
-    await saveFailureScreenshot(page, `${debugLabel}-prefill`);
+    // We catch and swallow any error here specifically so a broken screenshot
+    // (e.g. from an out-of-memory or timeout issue) doesn't abort the entire payment.
+    await saveFailureScreenshot(page, `${debugLabel}-prefill`).catch(() => {});
 
     // ── Shared error-text detector ────────────────────────────────────────────
     // Used both at the end of the flow (after submit) AND at each early-return
@@ -1514,6 +1517,47 @@ export async function payPremiumViaWebApp(
           break;
         }
         logger.warn({ frameSel, stripeFieldsFilled }, "Stripe iframe found but not all fields filled — trying next");
+      } catch (_) {}
+    }
+
+    // ── Try universal iframe search (fallback) ────────────────────────────────
+    if (!filled) {
+      try {
+        // Find ALL iframes on the page
+        const iframes = await page.locator("iframe").all();
+        for (let i = 0; i < iframes.length; i++) {
+          try {
+            const frame = page.frameLocator(`iframe >> nth=${i}`);
+
+            // Try direct named selectors inside this iframe
+            const cardInput = frame.locator(SELECTORS.cardNumber.join(", ")).first();
+            await cardInput.waitFor({ state: "visible", timeout: 1500 }).catch(() => {});
+            if (await cardInput.isVisible().catch(() => false)) {
+              await humanFill(cardInput, cardNum);
+              let iframeFieldsFilled = 1;
+
+              const expInput = frame.locator(SELECTORS.expiry.join(", ")).first();
+              await expInput.waitFor({ state: "visible", timeout: 1500 }).catch(() => {});
+              if (await expInput.isVisible().catch(() => false)) {
+                await humanFill(expInput, expDigits);
+                iframeFieldsFilled++;
+              }
+
+              const cvcInput = frame.locator(SELECTORS.cvc.join(", ")).first();
+              await cvcInput.waitFor({ state: "visible", timeout: 1500 }).catch(() => {});
+              if (await cvcInput.isVisible().catch(() => false)) {
+                await humanFill(cvcInput, card.cvv);
+                iframeFieldsFilled++;
+              }
+
+              if (iframeFieldsFilled >= 3) {
+                logger.info({ iframeIndex: i }, "Filled all card fields via universal iframe search");
+                filled = true;
+                break;
+              }
+            }
+          } catch (_) {}
+        }
       } catch (_) {}
     }
 
@@ -1646,6 +1690,29 @@ export async function payPremiumViaWebApp(
           clicked = true;
           logger.info({ sel }, "Clicked pay button");
           break;
+        }
+      } catch (_) {}
+    }
+
+    // Also check inside all iframes if button wasn't found in the main document
+    if (!clicked) {
+      try {
+        const iframes = await page.locator("iframe").all();
+        for (let i = 0; i < iframes.length; i++) {
+          if (clicked) break;
+          const frame = page.frameLocator(`iframe >> nth=${i}`);
+          for (const sel of SELECTORS.payButton) {
+            try {
+              const el = frame.locator(sel).first();
+              await el.waitFor({ state: "visible", timeout: 1000 }).catch(() => {});
+              if (await el.isVisible().catch(() => false)) {
+                await el.click();
+                clicked = true;
+                logger.info({ sel, iframeIndex: i }, "Clicked pay button inside iframe");
+                break;
+              }
+            } catch (_) {}
+          }
         }
       } catch (_) {}
     }
