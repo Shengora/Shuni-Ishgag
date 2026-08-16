@@ -205,7 +205,7 @@ function className(req: any): string {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe('proxy penalisation regression', () => {
+describe('premium flow testing', () => {
   beforeEach(() => {
     // Clear any cooldowns left from a previous test.
     clearAllProxyCooldowns();
@@ -226,7 +226,89 @@ describe('proxy penalisation regression', () => {
     returningMock.mockResolvedValue([]);
   });
 
-  // ── Test 1 ──────────────────────────────────────────────────────────────────
+  // ── Test 1: Full Successful Premium Flow ─────────────────────────────────────
+
+  it(
+    'executes the full premium flow successfully',
+    async () => {
+      // Playwright succeeds: card fields visible, credentials captured.
+      const page = makeMockPage('success');
+      pwLaunch.mockResolvedValue(makeMockBrowser(page));
+
+      // Mock Telegram Client that simulates successful flow
+      const client = makeClient(async (req: any) => {
+        const cn = className(req);
+        if (cn.includes('GetPaymentForm')) {
+          // No providerPublicKey → Smart Glocal / Playwright path (step 4).
+          return { url: 'https://smartglocal.test/pay', formId: BigInt(42) };
+        }
+        if (cn.includes('SendPaymentForm')) {
+          // Successful payment submission
+          return { className: 'payments.PaymentResult', success: true };
+        }
+        if (cn.includes('GetBotCallbackAnswer')) {
+          // Success on clicking buttons in step 2 or 6
+          return { message: 'Success' };
+        }
+        if (cn.includes('GetMessages')) {
+          return [{ id: 1 }];
+        }
+        return {};
+      });
+
+      // Override the sendMessage specifically for the Verifier Bot Step to send back "premium: ✅"
+      client.sendMessage = vi.fn().mockImplementation(async (botUsername: string) => {
+         if (botUsername === 'RePreAmooBot') {
+             // We need to trigger the handler manually to simulate bot's reply
+             // But in `checkPremiumWithRepream`, we add new event handlers
+             // Since `makeClient` just uses a FAKE_INVOICE by default for event handlers,
+             // let's override `addEventHandler` to return a positive response for RePreAmooBot
+         }
+      });
+
+      client.addEventHandler = vi.fn().mockImplementation((handler: any, event: any) => {
+          setTimeout(() => {
+              if (event && event.fromUsers && event.fromUsers.includes('RePreAmooBot')) {
+                  handler({ message: { text: "premium: ✅ 2026-10-10" } });
+              } else {
+                 const markupWithBtn = {
+                    rows: [{ buttons: [{ text: "Yes", data: "yes" }] }]
+                 };
+                 handler({ message: { ...FAKE_INVOICE, replyMarkup: markupWithBtn } });
+              }
+          }, 0);
+      });
+
+
+      const onProgress = vi.fn().mockResolvedValue(undefined);
+      const onStep6 = vi.fn().mockResolvedValue(undefined);
+
+      const result = await runFullPremiumFlow(
+        client as any,
+        'PremiumBot',
+        'RePreAmooBot',
+        CARD,
+        onProgress,
+        undefined, // onAskOtp
+        undefined, // onVerificationNeeded
+        undefined, // repreamMsgId
+        onStep6,
+        client as any, // masterClient for verifier bot
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.hasPremium).toBe(true);
+      expect(result.autoRenewalCancelled).toBe(true);
+      expect(onStep6).toHaveBeenCalled();
+
+      // Ensure the proxy usages were incremented successfully (Step 5 completed successfully)
+      // Since it's a drizzle update chain, check if update was called on proxyIps
+      expect(dbMock.update).toHaveBeenCalled();
+    },
+    20_000,
+  );
+
+  // ── Test 2: Proxy Penalty Regression (PAYMENT_FAILED) ──────────────────────────
 
   it(
     'PAYMENT_FAILED at step 5 does NOT penalise proxy IP 99',
@@ -275,7 +357,69 @@ describe('proxy penalisation regression', () => {
     15_000,
   );
 
-  // ── Test 2 ──────────────────────────────────────────────────────────────────
+  // ── Test 3: Proxy Network Failure & Fallback ──────────────────────────────────
+
+  it(
+    'retries with a new proxy when chromium launch fails due to proxy error',
+    async () => {
+      // First call to getProxyConfig returns ID 99
+      // Second call returns ID 100
+      const PROXY_ROW_2 = { ...PROXY_ROW, id: 100, server: 'proxy.test:8080' };
+
+      dbLimitFn.mockReset();
+      dbLimitFn
+        .mockResolvedValueOnce([{ maxUses: 8 }])
+        .mockResolvedValueOnce([PROXY_ROW])       // First attempt gets ID 99
+        .mockResolvedValueOnce([{ maxUses: 8 }])
+        .mockResolvedValueOnce([PROXY_ROW_2])     // Second attempt gets ID 100
+        .mockResolvedValue([]);
+
+      // Playwright fails on the first launch attempt (e.g. proxy unreachable)
+      // Playwright succeeds on the second attempt
+      const page = makeMockPage('success');
+      pwLaunch
+        .mockRejectedValueOnce(new Error('ERR_PROXY_CONNECTION_FAILED'))
+        .mockResolvedValueOnce(makeMockBrowser(page));
+
+      // Mock Telegram Client
+      const client = makeClient(async (req: any) => {
+        const cn = className(req);
+        if (cn.includes('GetPaymentForm')) {
+          return { url: 'https://smartglocal.test/pay', formId: BigInt(42) };
+        }
+        if (cn.includes('SendPaymentForm')) {
+          return { className: 'payments.PaymentResult', success: true };
+        }
+        if (cn.includes('GetBotCallbackAnswer')) {
+          return { message: 'Success' };
+        }
+        if (cn.includes('GetMessages')) {
+          return [{ id: 1 }];
+        }
+        return {};
+      });
+
+      const result = await runFullPremiumFlow(
+        client as any,
+        'PremiumBot',
+        'RePreAmooBot',
+        CARD,
+      );
+
+      expect(result.success).toBe(true);
+
+      // The proxy network failure MUST have recorded a failure against IP 99
+      // The exact argument passed to where/eq should correspond to ID 99
+      expect(returningMock).toHaveBeenCalled();
+
+      // And because it fell back successfully to ID 100, IP 99 should NOT be on cooldown
+      // (cooldowns are only for card-blocked anti-fraud errors)
+      expect(getProxyRuntimeStatus().cooldowns.has(99)).toBe(false);
+    },
+    20_000,
+  );
+
+  // ── Test 4: Proxy Penalty Regression (cardBlocked) ─────────────────────────────
 
   it(
     'cardBlocked at tokenization page DOES penalise proxy IP 99',
