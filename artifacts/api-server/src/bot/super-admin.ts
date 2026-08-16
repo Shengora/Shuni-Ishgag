@@ -1095,25 +1095,35 @@ export function registerSuperAdminCommands(bot: Bot): void {
         await ctx.api.deleteMessage(ctx.chat.id, promptMsgId).catch(() => {});
         await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
 
-        const insertedCount = { count: 0 };
+        let insertedCount = 0;
+        let insertionErrors = 0;
+
         for (const proxy of validProxies) {
-          const existing = await db.select().from(proxyIps).where(eq(proxyIps.server, proxy.server)).limit(1);
-          if (existing.length > 0) {
-            duplicateServers.push(proxy.server);
-            continue;
+          try {
+            const existing = await db.select().from(proxyIps).where(eq(proxyIps.server, proxy.server)).limit(1);
+            if (existing.length > 0) {
+              duplicateServers.push(proxy.server);
+              continue;
+            }
+            await db.insert(proxyIps).values(proxy);
+            insertedCount++;
+          } catch (insertErr: any) {
+            logger.warn({ insertErr, server: proxy.server }, "sa proxy single insert error");
+            insertionErrors++;
           }
-          await db.insert(proxyIps).values(proxy);
-          insertedCount.count++;
         }
 
         const { text, kb } = await buildProxyPanel();
 
-        let replyText = `✅ <b>${insertedCount.count} ta proksi</b> qo'shildi!\n\n`;
+        let replyText = `✅ <b>${insertedCount} ta proksi</b> qo'shildi!\n\n`;
         if (duplicateServers.length > 0) {
           replyText += `⚠️ <b>${duplicateServers.length} ta</b> proksi allaqachon mavjud (takroriy).\n`;
         }
         if (invalidLines.length > 0) {
           replyText += `❌ <b>${invalidLines.length} ta</b> qatorda format noto'g'ri (e'tiborga olinmadi).\n`;
+        }
+        if (insertionErrors > 0) {
+          replyText += `❌ <b>${insertionErrors} ta</b> proksini bazaga saqlashda xatolik yuz berdi.\n`;
         }
         replyText += `\n` + text;
 
@@ -1121,7 +1131,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       } catch (err: any) {
         logger.error({ err }, "sa proxy add error");
         await notifyError(err, "sa proxy add error");
-        await ctx.reply(`❌ Xato: ${err.message}`);
+        await ctx.reply(`❌ Umumiy xato yuz berdi: ${err.message}`);
       }
       return; // consumed — do not call next()
     }
