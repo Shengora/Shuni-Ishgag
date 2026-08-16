@@ -599,9 +599,7 @@ async function saveFailureScreenshot(page: any, label: string): Promise<void> {
     const ts = Date.now();
     const filePath = join(tmpdir(), `premium-fail-${label}-${ts}.png`);
     // Pass timeout explicitly so a hung page doesn't block forever
-    const screenshotPromise = page.screenshot({ fullPage: true, timeout: 5000 });
-    // Use a racing timeout as a secondary guard to prevent screenshot hang
-    const screenshotBuf: Buffer = await withTimeout(screenshotPromise, 6000, "screenshot");
+    const screenshotBuf: Buffer = await page.screenshot({ fullPage: true, timeout: 5000 });
     await writeFile(filePath, screenshotBuf);
     logger.warn({ screenshotPath: filePath }, "Saved failure screenshot");
   } catch (err: any) {
