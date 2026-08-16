@@ -67,6 +67,13 @@ function serializeLaunch<T>(fn: () => Promise<T>): Promise<T> {
 
 let _systemChromiumPath: string | null | undefined;
 function getSystemChromiumPath(): string | undefined {
+  // If PLAYWRIGHT_BROWSERS_PATH is explicitly set (like in Compute Engine's start-prod.sh),
+  // DO NOT use the system chromium (which might be a broken snap version).
+  // Always let Playwright use its bundled version.
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
+    return undefined;
+  }
+
   if (_systemChromiumPath !== undefined) return _systemChromiumPath ?? undefined;
   try {
     const out = execFileSync("which", ["chromium"], { encoding: "utf8" }).trim();
@@ -902,6 +909,8 @@ export interface PlaywrightCardResult {
    * block.
    */
   cardBlocked?: boolean;
+  /** Detailed technical error message if submitted is false and card is not blocked */
+  errorDetail?: string;
 }
 
 /**
@@ -1235,7 +1244,17 @@ export async function payPremiumViaWebApp(
         browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch(launchOpts), "Browser launch"));
       } catch (launchErr: any) {
         const msg: string = launchErr?.message ?? "";
-        if (!useReplitChromium && /Executable doesn't exist/i.test(msg)) {
+
+        // If the system chromium or replit chromium failed with missing executable, fallback entirely
+        if (executablePath && /Executable doesn't exist|Failed to launch/i.test(msg)) {
+          logger.warn(
+            { executablePath, err: msg.slice(0, 200) },
+            "Custom executable failed — falling back to bundled Playwright chromium (executablePath: undefined)"
+          );
+          const fallbackOpts = { ...launchOpts };
+          delete fallbackOpts.executablePath;
+          browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch(fallbackOpts), "Browser launch (fallback to bundled)"));
+        } else if (!useReplitChromium && /Executable doesn't exist/i.test(msg)) {
           logger.warn(
             { err: msg.slice(0, 200) },
             "Default chromium launch failed (browser binary missing) — retrying with channel:'chromium'",
@@ -1588,7 +1607,7 @@ export async function payPremiumViaWebApp(
         }
         logger.warn("No card inputs found on page — check pre-fill screenshot");
         await logVisibleHtml(page);
-        return { submitted: false };
+        return { submitted: false, errorDetail: "Sahifada hech qanday input maydoni topilmadi (HTML o'zgargan bo'lishi mumkin)" };
       }
 
       let filledCard = false;
@@ -1630,7 +1649,7 @@ export async function payPremiumViaWebApp(
         logger.warn({ filledCard, filledExp, filledCvc, inputCount: allInputs.length },
           "Could not identify all card fields — check pre-fill screenshot and HTML");
         await logVisibleHtml(page);
-        return { submitted: false };
+        return { submitted: false, errorDetail: `Kerakli maydonlar topilmadi (Karta: ${filledCard}, Muddat: ${filledExp}, CVV: ${filledCvc})` };
       }
     }
 
@@ -1666,7 +1685,7 @@ export async function payPremiumViaWebApp(
       }
       logger.warn("Could not find any submit button");
       await saveFailureScreenshot(page, debugLabel);
-      return { submitted: false };
+      return { submitted: false, errorDetail: "Sahifada to'lov tugmasi (Pay/Submit) topilmadi" };
     }
 
     // ── Handle 3DS OTP if the bank requires it ────────────────────────────────
@@ -1744,16 +1763,18 @@ export async function payPremiumViaWebApp(
     logger.warn("Could not capture credentials — will try SendPaymentForm without explicit token");
     return { submitted: true, proxyIpId };
 
-  } catch (err) {
+  } catch (err: any) {
+    const errorMsg = err?.message || String(err);
     if (watchdogFired) {
       logger.error({ debugLabel }, "payPremiumViaWebApp aborted by watchdog (card step exceeded time budget)");
+      return { submitted: false, errorDetail: "Kutish vaqti tugadi (Watchdog timeout: 120s dan o'tib ketdi)" };
     } else {
       logger.error({ err }, "payPremiumViaWebApp error");
       // Screenshot only while the browser is still alive — after a watchdog kill
       // the page is gone and page.screenshot() would itself hang.
       if (page) await saveFailureScreenshot(page, debugLabel).catch(() => {});
+      return { submitted: false, errorDetail: errorMsg };
     }
-    return { submitted: false };
   } finally {
     // Cancel the watchdog first so it doesn't fire again after we've cleaned up.
     clearTimeout(watchdog);
@@ -2648,12 +2669,17 @@ export async function runFullPremiumFlow(
         cooldownProxyIp(playwrightResult.proxyIpId);
         await recordProxyIpFailure(playwrightResult.proxyIpId).catch(() => {});
       }
+
+      const techError = playwrightResult.errorDetail
+        ? ` (Sabab: ${playwrightResult.errorDetail})`
+        : "";
+
       return {
         success: false,
         hasPremium: false,
         message: playwrightResult.cardBlocked
           ? "Karta anti-fraud tomonidan bloklandi (to'lov sahifasida xato ko'rsatildi)"
-          : "Karta formasi to'ldirishda xato — /tmp/premium-fail-*.png ga screenshot saqlandi",
+          : `Karta formasi to'ldirishda xato${techError} — /tmp/premium-fail-*.png ga screenshot saqlandi`,
         paymentDeclined: playwrightResult.cardBlocked,
       };
     }
