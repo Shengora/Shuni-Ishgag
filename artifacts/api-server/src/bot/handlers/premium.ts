@@ -528,20 +528,32 @@ export function registerPremiumHandlers(bot: Bot): void {
       return;
     }
 
-    const runCount = Math.min(total, actualLimit);
     const now = new Date();
     const allSessions = await db.select().from(userbotSessions)
       .where(and(eq(userbotSessions.status, "active"), eq(userbotSessions.ownerId, operatorId)))
       .orderBy(userbotSessions.createdAt);
 
-    const targets = allSessions
-      .filter((s) => (!s.hasPremium || !s.premiumExpiresAt || s.premiumExpiresAt <= now) && !activePremiumSessions.has(s.phone))
-      .slice(0, runCount);
+    const availableSessions = allSessions
+      .filter((s) => (!s.hasPremium || !s.premiumExpiresAt || s.premiumExpiresAt <= now) && !activePremiumSessions.has(s.phone));
 
-    if (!targets.length) {
+    if (!availableSessions.length) {
       await ctx.answerCallbackQuery("✅ Premiumsiz sessiya topilmadi.").catch(() => {});
       return;
     }
+
+    const actualTotal = Math.min(total, availableSessions.length);
+    if (total > availableSessions.length) {
+      await ctx.answerCallbackQuery({
+        text: `⚠️ Mantiqiy xato: Siz ${total} ta so'radingiz, lekin atigi ${availableSessions.length} ta premiumsiz sessiya mavjud. Shular uchungina olinadi.`,
+        show_alert: true
+      }).catch(() => {});
+    } else {
+      await ctx.answerCallbackQuery(`⏳ ${actualTotal} ta sessiya uchun Premium olinmoqda...`).catch(() => {});
+    }
+
+    const runCount = Math.min(actualTotal, actualLimit);
+    const targets = availableSessions.slice(0, runCount);
+    const remainingToRun = actualTotal - runCount;
 
     const chatId = ctx.chat!.id;
     let success = 0;
@@ -594,8 +606,6 @@ export function registerPremiumHandlers(bot: Bot): void {
     batchPremiumRunning.add(operatorId);
 
     try {
-      await ctx.answerCallbackQuery(`⏳ ${targets.length} ta sessiya uchun Premium olinmoqda...`).catch(() => {});
-
       const statusMsg = await ctx.reply(`⭐ <b>Avto Premium — 0 / ${targets.length}</b>\n\n🔄 Boshlanmoqda...`, { parse_mode: "HTML" });
       msgId = statusMsg.message_id;
 
@@ -874,10 +884,19 @@ export function registerPremiumHandlers(bot: Bot): void {
         const summary =
           `${success > 0 ? "⭐" : "❌"} <b>Avto Premium yakunlandi!</b>\n\n✅ Muvaffaqiyat: <b>${success}</b> ta\n❌ Xato: <b>${failed}</b> ta\n\n${lines.filter(Boolean).join("\n")}`;
 
+        const finishKb = new InlineKeyboard();
+        if (remainingToRun > 0) {
+          finishKb
+            .text(`Boshqa karta bilan yana ${remainingToRun} tasini olish`, `batch_premium:${remainingToRun}`).row()
+            .text("❌ Qolganini bekor qilish", "menu_home").row();
+        } else {
+          finishKb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+        }
+
         try {
-          await ctx.api.editMessageText(chatId, msgId, summary, { parse_mode: "HTML", reply_markup: menuButton() });
+          await ctx.api.editMessageText(chatId, msgId, summary, { parse_mode: "HTML", reply_markup: finishKb });
         } catch (_) {
-          await ctx.reply(summary, { parse_mode: "HTML", reply_markup: menuButton() });
+          await ctx.reply(summary, { parse_mode: "HTML", reply_markup: finishKb });
         }
       })();
     } finally {

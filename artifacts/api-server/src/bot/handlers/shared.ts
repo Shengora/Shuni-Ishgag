@@ -38,7 +38,7 @@ export const PREMIUM_BOT = (process.env.PREMIUM_BOT || "premiumbot").replace(/^@
 export const MAX_PREMIUM_RESTARTS = 5;
 export const PREMIUM_FLOW_TOTAL_TIMEOUT = 20 * 60 * 1000;
 export const ALLOWED_BATCH_COUNTS = new Set([1, 3, 5, 10, 20]);
-export const ALLOWED_PREMIUM_COUNTS = new Set([1, 5, 10]);
+export const ALLOWED_PREMIUM_COUNTS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 export const ALLOWED_CARD_USES = new Set([1, 2, 3, 4, 5]);
 
 // ── Legacy operator IDs (env fallback) ────────────────────────────────────────
@@ -202,8 +202,15 @@ export function countPickerKeyboard(): InlineKeyboard {
 export function premiumPickerKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("1 ta", "batch_premium:1").primary()
+    .text("2 ta", "batch_premium:2").primary()
+    .text("3 ta", "batch_premium:3").primary()
+    .row()
+    .text("4 ta", "batch_premium:4").primary()
     .text("5 ta", "batch_premium:5").primary()
-    .text("10 ta", "batch_premium:10").primary()
+    .text("6 ta", "batch_premium:6").primary()
+    .row()
+    .text("9 ta", "batch_premium:9").primary()
+    .text("12 ta", "batch_premium:12").primary()
     .row()
     .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 }
@@ -211,7 +218,9 @@ export function premiumPickerKeyboard(): InlineKeyboard {
 export function cardUsagePickerKeyboard(sessionCount: number, usedIn3Days: number, cardId: number): InlineKeyboard {
   const remaining = Math.max(0, 5 - usedIn3Days);
   const kb = new InlineKeyboard();
-  for (let n = 1; n <= 5; n++) {
+  const maxOptions = Math.min(5, sessionCount); // Only show options up to the requested number of sessions or 5 (max per card).
+
+  for (let n = 1; n <= maxOptions; n++) {
     const allowed = n <= remaining;
     if (allowed) {
       kb.text(`${n} ta`, `batch_premium_run:${sessionCount}:${n}:${cardId}`).success();
