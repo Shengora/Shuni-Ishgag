@@ -8,7 +8,7 @@ import { GoogleGenAI } from "@google/genai";
 import { Bot, InlineKeyboard } from "grammy";
 import { db } from "@workspace/db";
 import { admins, adminStats, statsPeriods, proxyIps, proxySettings, masterSessions, userbotSessions, providerBots } from "@workspace/db";
-import { eq, and, sql, desc, isNull, isNotNull, asc, lt } from "drizzle-orm";
+import { eq, and, sql, desc, isNull, isNotNull, asc, lt, inArray } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
 import { E, EID } from "../lib/emoji.js";
 import { withTimeout } from "../lib/timeout.js";
@@ -1065,7 +1065,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       awaitingSAInput.delete(uid);
 
       const input = ctx.message.text.trim();
-      const lines = input.split(/[\s\r\n]+/).map(l => l.trim()).filter(l => l.length > 0);
+      const lines = input.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 0);
 
       const validProxies: { server: string; username: string | null; password: string | null; isActive: boolean }[] = [];
       const invalidLines: string[] = [];
@@ -1098,18 +1098,37 @@ export function registerSuperAdminCommands(bot: Bot): void {
         let insertedCount = 0;
         let insertionErrors = 0;
 
-        for (const proxy of validProxies) {
+        if (validProxies.length > 0) {
+          let toInsert: typeof validProxies = [];
           try {
-            const existing = await db.select().from(proxyIps).where(eq(proxyIps.server, proxy.server)).limit(1);
-            if (existing.length > 0) {
-              duplicateServers.push(proxy.server);
-              continue;
+            // Only fetch the existing servers that match the input validProxies
+            const serversToInsert = validProxies.map(p => p.server);
+            const existingRows = await db.select({ server: proxyIps.server })
+              .from(proxyIps)
+              .where(inArray(proxyIps.server, serversToInsert));
+
+            const existingServers = new Set(existingRows.map((r: { server: string }) => r.server));
+
+            const seenInBatch = new Set<string>();
+            toInsert = validProxies.filter(p => {
+              if (existingServers.has(p.server) || seenInBatch.has(p.server)) {
+                duplicateServers.push(p.server);
+                return false;
+              }
+              seenInBatch.add(p.server);
+              return true;
+            });
+
+            if (toInsert.length > 0) {
+              await db.insert(proxyIps).values(toInsert).onConflictDoNothing();
+              insertedCount = toInsert.length;
             }
-            await db.insert(proxyIps).values(proxy);
-            insertedCount++;
           } catch (insertErr: any) {
-            logger.warn({ insertErr, server: proxy.server }, "sa proxy single insert error");
-            insertionErrors++;
+            logger.warn({ insertErr }, "sa proxy bulk insert error");
+
+            const toInsertCount = toInsert?.length ?? validProxies.length;
+            insertionErrors += toInsertCount;
+
           }
         }
 
