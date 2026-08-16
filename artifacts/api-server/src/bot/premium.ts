@@ -110,7 +110,7 @@ let _webshareCacheExpiry = 0;
 const WEBSHARE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /** Strips accidental leading scheme so we can prepend http:// cleanly */
-function normaliseProxyServer(raw: string): string {
+export function normaliseProxyServer(raw: string): string {
   return `http://${raw.replace(/^https?:\/\//i, "")}`;
 }
 
@@ -124,10 +124,10 @@ const PLAYWRIGHT_GOTO_TIMEOUT = Number.isFinite(_rawGotoTimeout) && _rawGotoTime
 // PLAYWRIGHT_TOTAL_TIMEOUT, ms). A watchdog force-kills the browser past this so
 // a wedged chromium can never hang a flow forever. Generous — only a genuine
 // hang reaches it; normal card entry finishes in a few seconds.
-const _rawTotalTimeout = parseInt(process.env.PLAYWRIGHT_TOTAL_TIMEOUT ?? "120000");
+const _rawTotalTimeout = parseInt(process.env.PLAYWRIGHT_TOTAL_TIMEOUT ?? "60000");
 const PLAYWRIGHT_TOTAL_TIMEOUT = Number.isFinite(_rawTotalTimeout) && _rawTotalTimeout > 0
   ? _rawTotalTimeout
-  : 120_000;
+  : 60_000;
 
 // Max time to wait for a graceful browser.close() before hard-killing chromium.
 const BROWSER_CLOSE_TIMEOUT_MS = 10_000;
@@ -1793,7 +1793,7 @@ export async function payPremiumViaWebApp(
     errorMsg = errorMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     if (watchdogFired) {
       logger.error({ debugLabel }, "payPremiumViaWebApp aborted by watchdog (card step exceeded time budget)");
-      return { submitted: false, errorDetail: "Kutish vaqti tugadi (Watchdog timeout: 120s dan o'tib ketdi)" };
+      return { submitted: false, errorDetail: "Kutish vaqti tugadi (Watchdog timeout: 60s dan o'tib ketdi)" };
     } else {
       logger.error({ err }, "payPremiumViaWebApp error");
       // Screenshot only while the browser is still alive — after a watchdog kill

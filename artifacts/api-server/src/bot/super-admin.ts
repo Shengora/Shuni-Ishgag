@@ -13,7 +13,7 @@ import { logger } from "../lib/logger.js";
 import { E, EID } from "../lib/emoji.js";
 import { withTimeout } from "../lib/timeout.js";
 import { notifyError } from "./notify.js";
-import { getProxyRuntimeStatus, clearAllProxyCooldowns } from "./premium.js";
+import { getProxyRuntimeStatus, clearAllProxyCooldowns, normaliseProxyServer } from "./premium.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -524,6 +524,7 @@ const awaitingBroadcastInput = new Set<number>();
 const awaitingSAInput    = new Map<number, number>(); // superAdminId → promptMsgId (add super admin)
 const awaitingIpInput    = new Map<number, number>(); // superAdminId → promptMsgId
 const awaitingLimitInput = new Map<number, number>(); // superAdminId → promptMsgId
+const awaitingIpDelete   = new Map<number, number>(); // superAdminId → promptMsgId (delete proxy by IP)
 
 // ── Register function ─────────────────────────────────────────────────────────
 
@@ -1055,6 +1056,40 @@ export function registerSuperAdminCommands(bot: Bot): void {
     if (!ctx.from || !(await isAnySuperAdmin(ctx.from.id))) return next();
     const uid = ctx.from.id;
 
+    // ── Branch A0: awaiting proxy IP delete input ─────────────────────────────
+    if (awaitingIpDelete.has(uid)) {
+      const promptMsgId = awaitingIpDelete.get(uid)!;
+      awaitingIpDelete.delete(uid);
+      awaitingAdminInput.delete(uid);
+      awaitingIpInput.delete(uid);
+      awaitingLimitInput.delete(uid);
+      awaitingSAInput.delete(uid);
+
+      const targetIp = ctx.message.text.trim();
+      const serverStr = normaliseProxyServer(targetIp);
+
+      try {
+        await ctx.api.deleteMessage(ctx.chat.id, promptMsgId).catch(() => {});
+        await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
+
+        // Find matching IP by server string
+        const matches = await db.select().from(proxyIps).where(eq(proxyIps.server, serverStr));
+        if (matches.length === 0) {
+          await ctx.reply(`❌ Hech qanday mos proksi topilmadi: <code>${serverStr}</code>`, { parse_mode: "HTML" });
+        } else {
+          await db.delete(proxyIps).where(eq(proxyIps.server, serverStr));
+          await ctx.reply(`🗑 <b>${matches.length} ta</b> proksi o'chirildi (<code>${serverStr}</code>)`, { parse_mode: "HTML" });
+        }
+
+        const { text, kb } = await buildProxyPanel();
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+      } catch (err: any) {
+        logger.error({ err }, "sa proxy delete by ip error");
+        await ctx.reply(`❌ Xato: ${err.message}`);
+      }
+      return;
+    }
+
     // ── Branch A: awaiting proxy IP input (checked first — cancels admin flow) ──
     if (awaitingIpInput.has(uid)) {
       const promptMsgId = awaitingIpInput.get(uid)!;
@@ -1063,6 +1098,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       awaitingAdminInput.delete(uid);
       awaitingLimitInput.delete(uid);
       awaitingSAInput.delete(uid);
+      awaitingIpDelete.delete(uid);
 
       const input = ctx.message.text.trim();
       const lines = input.split(/[\s\r\n]+/).map(l => l.trim()).filter(l => l.length > 0);
@@ -1143,6 +1179,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       awaitingAdminInput.delete(uid);
       awaitingIpInput.delete(uid);
       awaitingSAInput.delete(uid);
+      awaitingIpDelete.delete(uid);
 
       const val = parseInt(ctx.message.text.trim(), 10);
       if (isNaN(val) || val < 1 || val > 1000) {
@@ -1176,6 +1213,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       awaitingAdminInput.delete(uid);
       awaitingIpInput.delete(uid);
       awaitingLimitInput.delete(uid);
+      awaitingIpDelete.delete(uid);
 
       const targetId = Number(ctx.message.text.trim());
       if (!targetId || isNaN(targetId) || targetId < 1) {
@@ -1317,11 +1355,26 @@ export function registerSuperAdminCommands(bot: Bot): void {
 
   // Helper: build proxy overview text + keyboard
   async function buildProxyPanel() {
-    const [rows, maxUses] = await Promise.all([
+    const [rawRows, maxUses] = await Promise.all([
       db.select().from(proxyIps).orderBy(asc(proxyIps.usedCount)),
       getMaxUses(),
     ]);
     const { inFlight, cooldowns } = getProxyRuntimeStatus();
+
+    // Sort: disabled first, then cooldowns, then others
+    const rows = [...rawRows].sort((a, b) => {
+      const aDisabled = !a.isActive;
+      const bDisabled = !b.isActive;
+      if (aDisabled && !bDisabled) return -1;
+      if (!aDisabled && bDisabled) return 1;
+
+      const aCooldown = cooldowns.has(a.id);
+      const bCooldown = cooldowns.has(b.id);
+      if (aCooldown && !bCooldown) return -1;
+      if (!aCooldown && bCooldown) return 1;
+
+      return 0; // retain original order (usedCount) for others
+    });
 
     const active    = rows.filter((r) => r.isActive);
     const exhausted = active.filter((r) => r.usedCount >= maxUses).length;
@@ -1410,6 +1463,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       kb.text(`${badge} ${r.server}`, `sa_proxy_detail:${r.id}`).row();
     }
     kb.text("➕ IP qo'shish", "sa_proxy_add").row();
+    kb.text("🗑 IP yozib o'chirish", "sa_proxy_delete_by_ip").row();
     kb.text("📥 Webshare dan yuklash", "sa_proxy_ws_sync").row();
     kb.text("◀️ Super Admin Panel", "sa_main");
     return { text, kb };
@@ -1422,6 +1476,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
     const uid = ctx.from.id;
     awaitingIpInput.delete(uid);
     awaitingLimitInput.delete(uid);
+    awaitingIpDelete.delete(uid);
     const { text, kb } = await buildProxyPanel();
     try {
       await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
@@ -1772,6 +1827,29 @@ export function registerSuperAdminCommands(bot: Bot): void {
   bot.callbackQuery("sa_proxy_add_cancel", requireSA, async (ctx) => {
     await ctx.answerCallbackQuery();
     awaitingIpInput.delete(ctx.from!.id);
+    const { text, kb } = await buildProxyPanel();
+    try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }); } catch (_) {}
+  });
+
+  // ── sa_proxy_delete_by_ip — prompt for IP to delete ────────────────────────
+  bot.callbackQuery("sa_proxy_delete_by_ip", requireSA, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const msg = await ctx.reply(
+      `🗑 <b>IP orqali proksini o'chirish</b>\n\n` +
+      `O'chirmoqchi bo'lgan IP manzilni yuboring.\n` +
+      `Format: <code>host:port</code> (yoki port bilan kiritilsa avtomatik to'g'rilanadi)\n\n` +
+      `Misol:\n<code>185.22.154.10:8080</code>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("❌ Bekor qilish", "sa_proxy_delete_ip_cancel"),
+      },
+    );
+    awaitingIpDelete.set(ctx.from.id, msg.message_id);
+  });
+
+  bot.callbackQuery("sa_proxy_delete_ip_cancel", requireSA, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    awaitingIpDelete.delete(ctx.from!.id);
     const { text, kb } = await buildProxyPanel();
     try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }); } catch (_) {}
   });
