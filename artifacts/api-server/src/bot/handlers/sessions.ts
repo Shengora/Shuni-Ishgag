@@ -110,56 +110,6 @@ export function registerSessionHandlers(bot: Bot): void {
     })();
   });
 
-  // ── /delsession command ───────────────────────────────────────────────────
-  bot.command("delsession", async (ctx) => {
-    const phone = ctx.match?.trim();
-    if (!phone) {
-      await ctx.reply("❌ Format: /delsession <code>+998901234567</code>", { parse_mode: "HTML" });
-      return;
-    }
-
-    const userId = ctx.from!.id;
-    if (!await isOperator(userId)) return;
-
-    const session = await db
-      .select()
-      .from(userbotSessions)
-      .where(and(eq(userbotSessions.phone, phone), eq(userbotSessions.ownerId, userId)))
-      .limit(1);
-
-    if (!session.length) {
-      await ctx.reply(`❌ <code>${phone}</code> raqami sizning sessiyalar ro'yxatida topilmadi.`, { parse_mode: "HTML" });
-      return;
-    }
-
-    await db.delete(userbotSessions).where(eq(userbotSessions.phone, phone));
-    await ctx.reply(`✅ <code>${phone}</code> sessiyasi muvaffaqiyatli o'chirildi.`, { parse_mode: "HTML" });
-
-    // Try to cancel the number on the provider bot if it was recently added
-    void (async () => {
-      const pending = await db
-        .select()
-        .from(pendingNumbers)
-        .where(eq(pendingNumbers.phone, phone))
-        .orderBy(desc(pendingNumbers.createdAt))
-        .limit(1);
-
-      if (pending.length && pending[0].repreamMessageId && pending[0].cancelData) {
-        const client = await getMasterClient(userId);
-        if (client) {
-          try {
-            await clickRepreamButton(
-              client,
-              pending[0].providerBot ?? DEFAULT_REPREAM_BOT,
-              Number(pending[0].repreamMessageId),
-              pending[0].cancelData,
-            );
-          } catch (_) {}
-        }
-      }
-    })();
-  });
-
   // ── /list command ─────────────────────────────────────────────────────────
   bot.command("list", async (ctx) => {
     const uid = ctx.from!.id;
@@ -190,9 +140,16 @@ export function registerSessionHandlers(bot: Bot): void {
       return `${i + 1}. ${icon}${premiumBadge} <code>${s.phone}</code>${link}${expiry}`;
     });
 
+    const kb = new InlineKeyboard();
+    for (const s of sessions) {
+      kb.text(`❌ ${s.phone}`, `delsession:${s.phone}`).row();
+    }
+    kb.text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger().row();
+    kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+
     await ctx.reply(
-      `${E.NOTE} <b>Userbot sessiyalar (oxirgi 10):</b>\n\n${lines.join("\n\n")}\n\n<i>O'chirish uchun: /delsession +998...</i>`,
-      { parse_mode: "HTML", reply_markup: menuButton() },
+      `${E.NOTE} <b>Userbot sessiyalar (oxirgi 10):</b>\n\n${lines.join("\n\n")}`,
+      { parse_mode: "HTML", reply_markup: kb },
     );
   });
 
@@ -577,16 +534,99 @@ export function registerSessionHandlers(bot: Bot): void {
       return `${i + 1}. ${icon}${premiumBadge} <code>${s.phone}</code>${link}${expiry}`;
     });
 
+    const kb = new InlineKeyboard();
+    for (const s of sessions) {
+      kb.text(`❌ ${s.phone}`, `delsession:${s.phone}`).row();
+    }
+    kb.text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger().row();
+    kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+
     await ctx.reply(
-      `${E.NOTE} <b>Userbot sessiyalar (oxirgi 10):</b>\n\n${lines.join("\n\n")}\n\n<i>O'chirish uchun: /delsession +998...</i>`,
-      {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard()
-          .text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger()
-          .row()
-          .text("Bosh menyu", "menu_home").icon(EID.HOME).primary(),
-      },
+      `${E.NOTE} <b>Userbot sessiyalar (oxirgi 10):</b>\n\n${lines.join("\n\n")}`,
+      { parse_mode: "HTML", reply_markup: kb },
     );
+  });
+
+  // ── delsession callback ───────────────────────────────────────────────────
+  bot.callbackQuery(/^delsession:(.+)$/, async (ctx) => {
+    const phone = ctx.match[1];
+    const userId = ctx.from.id;
+
+    const session = await db
+      .select()
+      .from(userbotSessions)
+      .where(and(eq(userbotSessions.phone, phone), eq(userbotSessions.ownerId, userId)))
+      .limit(1);
+
+    if (!session.length) {
+      await ctx.answerCallbackQuery("❌ Sessiya topilmadi yoki sizga tegishli emas.").catch(() => {});
+      return;
+    }
+
+    await db.delete(userbotSessions).where(eq(userbotSessions.phone, phone));
+    await ctx.answerCallbackQuery(`✅ ${phone} o'chirildi.`).catch(() => {});
+
+    // Try to cancel on the provider
+    void (async () => {
+      const pending = await db
+        .select()
+        .from(pendingNumbers)
+        .where(eq(pendingNumbers.phone, phone))
+        .orderBy(desc(pendingNumbers.createdAt))
+        .limit(1);
+
+      if (pending.length && pending[0].repreamMessageId && pending[0].cancelData) {
+        const client = await getMasterClient(userId);
+        if (client) {
+          try {
+            await clickRepreamButton(
+              client,
+              pending[0].providerBot ?? DEFAULT_REPREAM_BOT,
+              Number(pending[0].repreamMessageId),
+              pending[0].cancelData,
+            );
+          } catch (_) {}
+        }
+      }
+    })();
+
+    // Refresh the list
+    const sessions = await db
+      .select()
+      .from(userbotSessions)
+      .where(eq(userbotSessions.ownerId, userId))
+      .orderBy(desc(userbotSessions.createdAt))
+      .limit(10);
+
+    if (!sessions.length) {
+      await ctx.editMessageText(
+        `${E.EMPTY} Hech qanday userbot sessiyasi yo'q.`,
+        { parse_mode: "HTML", reply_markup: menuButton() },
+      ).catch(() => {});
+      return;
+    }
+
+    const lines = sessions.map((s, i) => {
+      const icon = s.status === "active" ? E.OK : E.NO;
+      const premiumBadge = s.hasPremium ? ` ${E.STAR}` : "";
+      const link = s.telegramLink ? `\n   ${E.LINK} ${s.telegramLink}` : "";
+      const expiry = s.hasPremium && s.premiumExpiresAt
+        ? `\n   📅 ${s.premiumExpiresAt.toLocaleDateString("uz")}`
+        : "";
+      return `${i + 1}. ${icon}${premiumBadge} <code>${s.phone}</code>${link}${expiry}`;
+    });
+
+    const kb = new InlineKeyboard();
+    for (const s of sessions) {
+      kb.text(`❌ ${s.phone}`, `delsession:${s.phone}`).row();
+    }
+    kb.text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger().row();
+    kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+
+    await ctx.editMessageText(
+      `${E.NOTE} <b>Userbot sessiyalar (oxirgi 10):</b>\n\n${lines.join("\n\n")}`,
+      { parse_mode: "HTML", reply_markup: kb },
+    ).catch(() => {});
   });
 
   // ── menu_cleanup_sessions callback ────────────────────────────────────────
