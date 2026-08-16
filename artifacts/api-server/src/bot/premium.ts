@@ -67,13 +67,6 @@ function serializeLaunch<T>(fn: () => Promise<T>): Promise<T> {
 
 let _systemChromiumPath: string | null | undefined;
 function getSystemChromiumPath(): string | undefined {
-  // If PLAYWRIGHT_BROWSERS_PATH is explicitly set (like in Compute Engine's start-prod.sh),
-  // DO NOT use the system chromium (which might be a broken snap version).
-  // Always let Playwright use its bundled version.
-  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
-    return undefined;
-  }
-
   if (_systemChromiumPath !== undefined) return _systemChromiumPath ?? undefined;
   try {
     const out = execFileSync("which", ["chromium"], { encoding: "utf8" }).trim();
@@ -1231,37 +1224,71 @@ export async function payPremiumViaWebApp(
         return raced;
       };
 
+      // Ensure we have a clean launch options base without executablePath initially if PLAYWRIGHT_BROWSERS_PATH is set
+      const baseLaunchOpts = { ...launchOpts };
+      if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
+        delete baseLaunchOpts.executablePath; // Force bundled first
+      }
+
       try {
-        // Default: let Playwright pick its bundled headless-shell build for
-        // `chromium` (fastest). If that specific browser wasn't downloaded by
-        // the production build step (e.g. after a Playwright version bump
-        // adds/renames a browser target), fall back to the full "chromium"
-        // channel below instead of failing every payment outright.
-        // Bounded explicitly (not just via the outer watchdog): a browser.launch()
-        // that never settles (e.g. proxy misconfiguration, exhausted resources)
-        // must fail fast with a clear, logged reason rather than silently stalling
-        // until the much coarser 120s total-flow watchdog eventually kills it.
-        browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch(launchOpts), "Browser launch"));
+        // First try: either bundled (if PLAYWRIGHT_BROWSERS_PATH is set or no system chromium)
+        // or system chromium (if PLAYWRIGHT_BROWSERS_PATH is NOT set and system chromium exists)
+        browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch(baseLaunchOpts), "Browser launch (primary)"));
       } catch (launchErr: any) {
         const msg: string = launchErr?.message ?? "";
 
-        // If the system chromium or replit chromium failed with missing executable, fallback entirely
-        if (executablePath && /Executable doesn't exist|Failed to launch/i.test(msg)) {
-          logger.warn(
-            { executablePath, err: msg.slice(0, 200) },
-            "Custom executable failed — falling back to bundled Playwright chromium (executablePath: undefined)"
-          );
-          const fallbackOpts = { ...launchOpts };
-          delete fallbackOpts.executablePath;
-          browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch(fallbackOpts), "Browser launch (fallback to bundled)"));
-        } else if (!useReplitChromium && /Executable doesn't exist/i.test(msg)) {
-          logger.warn(
-            { err: msg.slice(0, 200) },
-            "Default chromium launch failed (browser binary missing) — retrying with channel:'chromium'",
-          );
-          browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch({ ...launchOpts, channel: "chromium" }), "Browser launch (chromium channel)"));
+        const isMissingErr = /Executable doesn't exist|Failed to launch/i.test(msg);
+
+        if (isMissingErr) {
+          logger.warn({ err: msg.slice(0, 200) }, "Primary browser launch failed. Cascading to fallback options...");
+
+          let fallbackSuccess = false;
+
+          // Fallback 1: If we tried bundled first (because PLAYWRIGHT_BROWSERS_PATH was set, or missing executablePath),
+          // try system chromium if available.
+          if (!baseLaunchOpts.executablePath && systemChromiumPath) {
+             try {
+               logger.info({ systemChromiumPath }, "Fallback 1: Trying system chromium");
+               const fallbackOpts = { ...launchOpts, executablePath: systemChromiumPath };
+               browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch(fallbackOpts), "Browser launch (fallback to system chromium)"));
+               fallbackSuccess = true;
+             } catch (fbErr: any) {
+               logger.warn({ err: String(fbErr).slice(0, 200) }, "Fallback 1 (system chromium) failed");
+             }
+          }
+
+          // Fallback 2: If we tried custom executable first (system/replit chromium), try bundled.
+          if (!fallbackSuccess && baseLaunchOpts.executablePath) {
+             try {
+               logger.info("Fallback 2: Trying bundled Playwright chromium");
+               const fallbackOpts = { ...launchOpts };
+               delete fallbackOpts.executablePath;
+               browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch(fallbackOpts), "Browser launch (fallback to bundled)"));
+               fallbackSuccess = true;
+             } catch (fbErr: any) {
+               logger.warn({ err: String(fbErr).slice(0, 200) }, "Fallback 2 (bundled chromium) failed");
+             }
+          }
+
+          // Fallback 3: Finally, try channel: 'chromium'
+          if (!fallbackSuccess) {
+             try {
+               logger.info("Fallback 3: Trying channel: 'chromium'");
+               const fallbackOpts = { ...launchOpts, channel: "chromium" };
+               delete fallbackOpts.executablePath;
+               browser = await serializeLaunch(() => launchRacingTimeout(pw.chromium.launch(fallbackOpts), "Browser launch (chromium channel)"));
+               fallbackSuccess = true;
+             } catch (fbErr: any) {
+               logger.warn({ err: String(fbErr).slice(0, 200) }, "Fallback 3 (chromium channel) failed");
+             }
+          }
+
+          if (!fallbackSuccess) {
+            logger.error("All browser launch fallbacks failed");
+            throw launchErr;
+          }
         } else {
-          logger.error({ err: msg.slice(0, 300) }, "Browser launch failed or timed out");
+          logger.error({ err: msg.slice(0, 300) }, "Browser launch failed or timed out (non-executable error)");
           throw launchErr;
         }
       }
@@ -1762,7 +1789,8 @@ export async function payPremiumViaWebApp(
     }
     throw new Error("Max retries exceeded");
   } catch (err: any) {
-    const errorMsg = err?.message || String(err);
+    let errorMsg = err?.message || String(err);
+    errorMsg = errorMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     if (watchdogFired) {
       logger.error({ debugLabel }, "payPremiumViaWebApp aborted by watchdog (card step exceeded time budget)");
       return { submitted: false, errorDetail: "Kutish vaqti tugadi (Watchdog timeout: 120s dan o'tib ketdi)" };

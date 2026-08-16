@@ -341,7 +341,8 @@ export function registerPremiumHandlers(bot: Bot): void {
             }
             logger.error({ err }, "getpremium command error");
             await notifyError(err, "getpremium command error");
-            await update(`❌ Xato: ${err.message}`);
+            const safeErrMsg = (err.message || String(err)).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            await update(`❌ Xato: ${safeErrMsg}`);
             break;
           } finally {
             pendingStep6Callbacks.delete(attemptId);
@@ -844,7 +845,8 @@ export function registerPremiumHandlers(bot: Bot): void {
                 logger.error({ err, phone }, "batch_premium_run flow error");
                 await notifyError(err, "batch_premium_run flow error", { phone });
                 failed++;
-                lines[step - 1] = `${step}. ❌ <code>${phone}</code> — ${err.message?.slice(0, 60) ?? "xato"}`;
+                const safeErrMsg = (err.message || String(err)).slice(0, 60).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                lines[step - 1] = `${step}. ❌ <code>${phone}</code> — ${safeErrMsg}`;
                 break;
               } finally {
                 pendingStep6Callbacks.delete(attemptId);
