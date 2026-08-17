@@ -21,11 +21,13 @@ import {
   signInWithCodeAndPass,
   releaseSignedInClient,
 } from "../client.js";
+import { getMasterClientsList } from "../client.js";
 import { notifyError } from "../notify.js";
 import {
   isOperator,
   batchRunning,
   operatorSelectedSource,
+  operatorSelectedSlot,
   getOperatorSource,
   claimUserbotSession,
   ALLOWED_BATCH_COUNTS,
@@ -36,16 +38,102 @@ import {
 
 export function registerBatchHandlers(bot: Bot): void {
 
-  // ── menu_getnumber: show source picker (>1 bots) OR count picker directly ─
+  // ── menu_getnumber: show slot picker (>1 slots), source picker (>1 bots), OR count picker directly ─
   bot.callbackQuery("menu_getnumber", async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
     const uid = ctx.from.id;
 
     void (async () => {
+      const slots = await getMasterClientsList(uid);
+      if (slots.length === 0) {
+        await ctx.reply(
+          "❌ Operator hisob ulanmagan.\n\n🔑 Avval login qiling:",
+          { reply_markup: new InlineKeyboard().text("Login", "menu_login").icon(EID.KEY).success() },
+        ).catch(() => {});
+        return;
+      }
+
+      if (slots.length > 1) {
+        const kb = new InlineKeyboard();
+        for (const slot of slots) {
+          const label = slot.isShared ? `${slot.phone} (Ulashilgan)` : `${slot.phone} (slot ${slot.slot})`;
+          kb.text(label, `slot_pick:${slot.ownerId}:${slot.slot}`).row();
+        }
+        kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+        await ctx.reply(
+          `👤 <b>Qaysi hisobdan raqam olasiz?</b>\n\nIltimos, master hisobni tanlang:`,
+          { parse_mode: "HTML", reply_markup: kb },
+        ).catch(() => {});
+        return;
+      } else {
+        const previous = operatorSelectedSlot.get(uid);
+        if (previous?.ownerId !== slots[0].ownerId || previous?.slot !== slots[0].slot) {
+          operatorSelectedSlot.set(uid, { ownerId: slots[0].ownerId, slot: slots[0].slot });
+          const { removeMasterSession } = await import("../client.js");
+          await removeMasterSession(uid);
+        }
+      }
+
       const client = await getMasterClient(uid);
       if (!client) {
         await ctx.reply(
-          "❌ Operator hisob ulanmagan.\n\n🔑 Avval login qiling:",
+          "❌ Master hisobga ulanib bo'lmadi.\n\n🔑 Avval login qiling:",
+          { reply_markup: new InlineKeyboard().text("Login", "menu_login").icon(EID.KEY).success() },
+        ).catch(() => {});
+        return;
+      }
+
+      const activeBots = await db.select().from(providerBots).where(eq(providerBots.isActive, true));
+
+      if (activeBots.length > 1) {
+        const current = operatorSelectedSource.get(uid);
+        const kb = new InlineKeyboard();
+        for (const b of activeBots) {
+          const isSelected = b.username === current;
+          kb.text(`@${b.username}`, `src_pick:${b.username}`).icon(isSelected ? EID.OK : EID.ROBOT).primary().row();
+        }
+        kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+        await ctx.reply(
+          `🌐 <b>Manba bot tanlang</b>\n\n` +
+            (current ? `Joriy: @${current}\n\n` : "") +
+            `Qaysi botdan raqam olmoqchisiz?`,
+          { parse_mode: "HTML", reply_markup: kb },
+        ).catch(() => {});
+        return;
+      }
+
+      if (activeBots.length === 1) {
+        operatorSelectedSource.set(uid, activeBots[0].username);
+      }
+
+      await ctx.reply(
+        `${E.PHONE} <b>Nechta raqam olish kerak?</b>\n\nRaqam olinib, avtomatik sessiya yaratiladi.`,
+        { parse_mode: "HTML", reply_markup: countPickerKeyboard() },
+      ).catch(() => {});
+    })();
+  });
+
+  // ── slot_pick: save selected slot + show source picker or count picker ──
+  bot.callbackQuery(/^slot_pick:(\d+):(\d+)$/, async (ctx) => {
+    const ownerId = parseInt(ctx.match[1], 10);
+    const slot = parseInt(ctx.match[2], 10);
+    const uid = ctx.from.id;
+
+    const previous = operatorSelectedSlot.get(uid);
+    if (previous?.ownerId !== ownerId || previous?.slot !== slot) {
+      operatorSelectedSlot.set(uid, { ownerId, slot });
+      // Invalidate master client cache to enforce the new slot selection on next `getMasterClient` call.
+      const { removeMasterSession } = await import("../client.js");
+      await removeMasterSession(uid);
+    }
+
+    await ctx.answerCallbackQuery(`✅ Slot tanlandi`).catch(() => {});
+
+    void (async () => {
+      const client = await getMasterClient(uid);
+      if (!client) {
+        await ctx.reply(
+          "❌ Tanlangan master hisobga ulanib bo'lmadi.",
           { reply_markup: new InlineKeyboard().text("Login", "menu_login").icon(EID.KEY).success() },
         ).catch(() => {});
         return;

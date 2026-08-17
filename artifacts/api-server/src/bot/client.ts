@@ -257,6 +257,48 @@ export async function verifyAndPurgeDeadSessions(
 
 // ── Master client (per operator) ──────────────────────────────────────────────
 
+import { operatorSelectedSlot } from "./handlers/shared.js";
+
+// ── Master client (per operator) ──────────────────────────────────────────────
+
+export type MasterSessionMeta = {
+  ownerId: number;
+  slot: number;
+  phone: string;
+  isShared: boolean;
+};
+
+export async function getMasterClientsList(operatorId: number): Promise<MasterSessionMeta[]> {
+  const result: MasterSessionMeta[] = [];
+
+  const sessions = await db
+    .select()
+    .from(masterSessions)
+    .where(eq(masterSessions.operatorId, operatorId))
+    .orderBy(asc(masterSessions.slot));
+
+  for (const row of sessions) {
+    result.push({ ownerId: row.operatorId, slot: row.slot, phone: row.phone, isShared: false });
+  }
+
+  const allRows = await db
+    .select()
+    .from(masterSessions)
+    .orderBy(asc(masterSessions.slot));
+
+  for (const row of allRows) {
+    if (!row.sharedWith) continue;
+    try {
+      const ids: number[] = JSON.parse(row.sharedWith);
+      if (ids.includes(operatorId)) {
+        result.push({ ownerId: row.operatorId, slot: row.slot, phone: row.phone, isShared: true });
+      }
+    } catch {}
+  }
+
+  return result;
+}
+
 export async function getMasterClient(operatorId: number): Promise<TelegramClient | null> {
   const cached = _masterClients.get(operatorId);
   if (cached) {
@@ -271,6 +313,8 @@ export async function getMasterClient(operatorId: number): Promise<TelegramClien
     _masterClients.delete(operatorId);
   }
 
+  const selected = operatorSelectedSlot.get(operatorId);
+
   // ── 1. Own sessions — try all slots in ascending order ───────────────────
   const sessions = await db
     .select()
@@ -279,6 +323,7 @@ export async function getMasterClient(operatorId: number): Promise<TelegramClien
     .orderBy(asc(masterSessions.slot));
 
   for (const row of sessions) {
+    if (selected && (selected.ownerId !== operatorId || selected.slot !== row.slot)) continue;
     try {
       const session = new StringSession(row.sessionString);
       const client = new TelegramClient(session, API_ID, API_HASH, {
@@ -323,6 +368,7 @@ export async function getMasterClient(operatorId: number): Promise<TelegramClien
     .orderBy(asc(masterSessions.slot));
 
   const sharedRows = allRows.filter((row) => {
+    if (selected && (selected.ownerId !== row.operatorId || selected.slot !== row.slot)) return false;
     if (!row.sharedWith) return false;
     try {
       const ids: number[] = JSON.parse(row.sharedWith);
