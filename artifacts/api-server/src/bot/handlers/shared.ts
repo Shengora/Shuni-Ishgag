@@ -56,6 +56,7 @@ export const isOperator = async (userId: number): Promise<boolean> => {
 // ── Per-operator batch locks ──────────────────────────────────────────────────
 export const batchRunning = new Set<number>();
 export const batchPremiumRunning = new Set<number>();
+export const pendingBatchPremium = new Map<number, { totalRequested: number, selections: {cardId: number, uses: number}[] }>();
 
 // ── Global per-session premium lock ───────────────────────────────────────────
 export const activePremiumSessions = new Set<string>();
@@ -215,21 +216,21 @@ export function premiumPickerKeyboard(): InlineKeyboard {
     .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 }
 
-export function cardUsagePickerKeyboard(sessionCount: number, usedIn3Days: number, cardId: number): InlineKeyboard {
+export function cardUsagePickerKeyboard(sessionCount: number, usedIn3Days: number, cardId: number, remainingToSelect: number): InlineKeyboard {
   const remaining = Math.max(0, 5 - usedIn3Days);
   const kb = new InlineKeyboard();
-  const maxOptions = Math.min(5, sessionCount); // Only show options up to the requested number of sessions or 5 (max per card).
+  const maxOptions = Math.min(5, remainingToSelect);
 
   for (let n = 1; n <= maxOptions; n++) {
     const allowed = n <= remaining;
     if (allowed) {
-      kb.text(`${n} ta`, `batch_premium_run:${sessionCount}:${n}:${cardId}`).success();
+      kb.text(`${n} ta`, `batch_premium_add:${sessionCount}:${n}:${cardId}`).success();
     } else {
       kb.text(`${n} ✗`, `card_limit_exceeded`).danger();
     }
   }
   return kb.row()
-    .text("Kartalar", `batch_premium:${sessionCount}`).icon(EID.CARD).primary()
+    .text("Kartalar", `batch_premium_next`).icon(EID.CARD).primary()
     .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 }
 
