@@ -45,6 +45,7 @@ import {
   clearCrTs,
   getDefaultVerifierBot,
   getDefaultCard,
+  pendingBatchPremium,
   PREMIUM_BOT,
   MAX_PREMIUM_RESTARTS,
   PREMIUM_FLOW_TOTAL_TIMEOUT,
@@ -396,6 +397,71 @@ export function registerPremiumHandlers(bot: Bot): void {
     );
   });
 
+  // ── Shared Card Picker Logic ────────────────────────────────────────────────
+  async function showCardListForBatch(ctx: any, operatorId: number, total: number) {
+    const cards = await db.select().from(savedCards)
+      .where(eq(savedCards.userId, operatorId)).orderBy(desc(savedCards.createdAt));
+
+    if (!cards.length) {
+      await ctx.answerCallbackQuery("❌ Karta saqlanmagan!").catch(() => {});
+      return;
+    }
+
+    const state = pendingBatchPremium.get(operatorId);
+    let remainingToSelect = total;
+    let selectedCount = 0;
+    if (state) {
+      const selectedSoFar = state.selections.reduce((acc: number, sel: any) => acc + sel.uses, 0);
+      remainingToSelect = total - selectedSoFar;
+      selectedCount = selectedSoFar;
+    }
+
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const kb = new InlineKeyboard();
+    const lines: string[] = [];
+
+    for (const c of cards) {
+      const usages = await db.select().from(cardUsages).where(
+        and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgo)),
+      );
+      // Also consider uses already requested in current pending state
+      let pendingUses = 0;
+      if (state) {
+        pendingUses = state.selections.filter((s: any) => s.cardId === c.id).reduce((acc: number, s: any) => acc + s.uses, 0);
+      }
+
+      const used = usages.length + pendingUses;
+      const remaining = Math.max(0, 5 - used);
+      const label = c.bankName ?? c.cardHolder;
+      const statusIcon = remaining === 0 ? "🔴" : remaining <= 2 ? "🟡" : "🟢";
+
+      if (remaining > 0) {
+        kb.text(`${label} ${c.cardNumberMasked} ${statusIcon} ${used}/5`, `batch_premium_card:${total}:${c.id}`)
+          .icon(c.isDefault ? EID.STAR : EID.CARD).success().row();
+      } else {
+        kb.text(`${label} ${c.cardNumberMasked} ${statusIcon} ${used}/5`, `card_limit_exceeded`)
+          .icon(EID.CARD).danger().row();
+      }
+      lines.push(`${c.isDefault ? "⭐ " : "💳 "}<b>${label}</b> <code>${c.cardNumberMasked}</code> — ${used}/5 ishlatilgan (kutilyapti bilan)`);
+    }
+
+    if (selectedCount > 0) {
+      kb.text("▶️ Boshlash (Tanlanganlar bilan)", "batch_premium_start").icon(EID.OK).success().row();
+    }
+
+    kb.text(selectedCount > 0 ? "❌ Bekor qilish" : "Orqaga", selectedCount > 0 ? "menu_home" : "menu_getpremium").icon(EID.NO).primary()
+      .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+
+    const titleMsg = selectedCount > 0
+      ? `💳 <b>Qolgan ${remainingToSelect} ta sessiya uchun karta tanlang</b>`
+      : `💳 <b>Karta tanlang</b>`;
+
+    await ctx.reply(
+      `${titleMsg}\n\n<i>Jami: ${total} ta sessiya. Hozirgacha tanlandi: ${selectedCount} ta.</i>\n\n${lines.join("\n")}\n\n🟢 bo'sh | 🟡 kam qoldi | 🔴 tugagan`,
+      { parse_mode: "HTML", reply_markup: kb },
+    );
+  }
+
   // ── batch_premium:N — show card list ──────────────────────────────────────
   bot.callbackQuery(/^batch_premium:(\d+)$/, async (ctx) => {
     const total = parseInt(ctx.match[1]);
@@ -410,44 +476,10 @@ export function registerPremiumHandlers(bot: Bot): void {
       return;
     }
 
-    const cards = await db.select().from(savedCards)
-      .where(eq(savedCards.userId, operatorId)).orderBy(desc(savedCards.createdAt));
-
-    if (!cards.length) {
-      await ctx.answerCallbackQuery("❌ Karta saqlanmagan!").catch(() => {});
-      return;
-    }
-
     await ctx.answerCallbackQuery().catch(() => {});
 
-    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-    const kb = new InlineKeyboard();
-    const lines: string[] = [];
-
-    for (const c of cards) {
-      const usages = await db.select().from(cardUsages).where(
-        and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgo)),
-      );
-      const used = usages.length;
-      const remaining = Math.max(0, 5 - used);
-      const label = c.bankName ?? c.cardHolder;
-      const statusIcon = remaining === 0 ? "🔴" : remaining <= 2 ? "🟡" : "🟢";
-      if (remaining > 0) {
-        kb.text(`${label} ${c.cardNumberMasked} ${statusIcon} ${used}/5`, `batch_premium_card:${total}:${c.id}`)
-          .icon(c.isDefault ? EID.STAR : EID.CARD).success().row();
-      } else {
-        kb.text(`${label} ${c.cardNumberMasked} ${statusIcon} ${used}/5`, `card_limit_exceeded`)
-          .icon(EID.CARD).danger().row();
-      }
-      lines.push(`${c.isDefault ? "⭐ " : "💳 "}<b>${label}</b> <code>${c.cardNumberMasked}</code> — ${used}/5 ishlatilgan`);
-    }
-    kb.text("Orqaga", "menu_getpremium").icon(EID.STAR).primary()
-      .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
-
-    await ctx.reply(
-      `💳 <b>Karta tanlang</b>\n\n<i>${total} ta sessiya uchun Premium olinadi.</i>\n\n${lines.join("\n")}\n\n🟢 bo'sh | 🟡 kam qoldi | 🔴 tugagan`,
-      { parse_mode: "HTML", reply_markup: kb },
-    );
+    pendingBatchPremium.set(operatorId, { totalRequested: total, selections: [] });
+    await showCardListForBatch(ctx, operatorId, total);
   });
 
   // ── batch_premium_card:N:cardId — show usage picker ───────────────────────
@@ -468,11 +500,22 @@ export function registerPremiumHandlers(bot: Bot): void {
       return;
     }
 
+    const state = pendingBatchPremium.get(operatorId);
+    if (!state || state.totalRequested !== total) {
+      await ctx.answerCallbackQuery("❌ Jarayon eskirgan, iltimos boshidan boshlang.").catch(() => {});
+      return;
+    }
+
+    const selectedSoFar = state.selections.reduce((acc, sel) => acc + sel.uses, 0);
+    const remainingToSelect = total - selectedSoFar;
+
     const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
     const usages = await db.select().from(cardUsages).where(
       and(eq(cardUsages.cardNumber, cardRow.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgo)),
     );
-    const usedIn3Days = usages.length;
+
+    const pendingUses = state.selections.filter((s) => s.cardId === cardId).reduce((acc, s) => acc + s.uses, 0);
+    const usedIn3Days = usages.length + pendingUses;
     const remaining = Math.max(0, 5 - usedIn3Days);
     const label = cardRow.bankName ?? cardRow.cardHolder;
 
@@ -480,53 +523,84 @@ export function registerPremiumHandlers(bot: Bot): void {
 
     if (remaining === 0) {
       await ctx.reply(
-        `⛔ <b>Karta limiti tugagan</b>\n\n💳 <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi 3 kunda allaqachon <b>5 marta</b> ishlatilgan.\n\n🕐 Limit yangilanishi uchun kuting yoki boshqa karta tanlang.`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("◀️ Kartalar", `batch_premium:${total}`).text("🏠 Bosh menyu", "menu_home") },
+        `⛔ <b>Karta limiti tugagan</b>\n\n💳 <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi 3 kunda allaqachon <b>5 marta</b> ishlatilgan (yoki navbatga qo'yilgan).\n\n🕐 Limit yangilanishi uchun kuting yoki boshqa karta tanlang.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("◀️ Kartalar", `batch_premium_next`).text("🏠 Bosh menyu", "menu_home") },
       );
       return;
     }
 
     await ctx.reply(
-      `💳 <b>Nechta obuna olish kerak?</b>\n\nKarta: <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi 3 kunda: <b>${usedIn3Days}/5</b> marta ishlatilgan\nQolgan: <b>${remaining} ta</b>\n\n<i>Bu karta bilan nechta raqamga Premium olish kerak?</i>`,
-      { parse_mode: "HTML", reply_markup: cardUsagePickerKeyboard(total, usedIn3Days, cardId) },
+      `💳 <b>Nechta obuna olish kerak?</b>\n\nKarta: <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi 3 kunda: <b>${usedIn3Days}/5</b> marta ishlatilgan (kutilyotgan bilan)\nQolgan: <b>${remaining} ta</b>\n\n<i>Bu karta bilan yana nechta raqamga Premium olish kerak?</i>\nJami tanlanishi kerak bo'lganlar: <b>${remainingToSelect}</b> ta.`,
+      { parse_mode: "HTML", reply_markup: cardUsagePickerKeyboard(total, usedIn3Days, cardId, remainingToSelect) },
     );
   });
 
-  // ── batch_premium_run:N:uses:cardId — run the batch ───────────────────────
-  bot.callbackQuery(/^batch_premium_run:(\d+):(\d+):(\d+)$/, async (ctx) => {
-    const total     = parseInt(ctx.match[1]);
-    const cardLimit = parseInt(ctx.match[2]);
-    const cardId    = parseInt(ctx.match[3]);
-    if (!ALLOWED_PREMIUM_COUNTS.has(total) || !ALLOWED_CARD_USES.has(cardLimit) || isNaN(cardId)) {
+  // ── State Accumulation Handlers ─────────────────────────────────────────────
+  bot.callbackQuery(/^batch_premium_add:(\d+):(\d+):(\d+)$/, async (ctx) => {
+    const total = parseInt(ctx.match[1]);
+    const uses = parseInt(ctx.match[2]);
+    const cardId = parseInt(ctx.match[3]);
+
+    if (!ALLOWED_PREMIUM_COUNTS.has(total) || !ALLOWED_CARD_USES.has(uses) || isNaN(cardId)) {
       await ctx.answerCallbackQuery("❌ Noto'g'ri tanlov.").catch(() => {});
       return;
     }
 
     const operatorId = ctx.from.id;
+    const state = pendingBatchPremium.get(operatorId);
+    if (!state || state.totalRequested !== total) {
+      await ctx.answerCallbackQuery("❌ Jarayon eskirgan yoki bekor qilingan.").catch(() => {});
+      return;
+    }
+
+    state.selections.push({ cardId, uses });
+
+    const selectedSoFar = state.selections.reduce((acc, sel) => acc + sel.uses, 0);
+    const remainingToSelect = state.totalRequested - selectedSoFar;
+
+    await ctx.answerCallbackQuery(`✅ Karta tanlandi. ${uses} ta qismi belgilandi.`).catch(() => {});
+
+    if (remainingToSelect > 0) {
+      await showCardListForBatch(ctx, operatorId, total);
+    } else {
+      // Start execution
+      await startBatchPremiumExecution(ctx, operatorId, state);
+    }
+  });
+
+  bot.callbackQuery("batch_premium_next", async (ctx) => {
+    await ctx.answerCallbackQuery().catch(() => {});
+    const operatorId = ctx.from.id;
+    const state = pendingBatchPremium.get(operatorId);
+    if (!state) {
+      await ctx.reply("❌ Jarayon topilmadi.", { reply_markup: menuButton() });
+      return;
+    }
+    await showCardListForBatch(ctx, operatorId, state.totalRequested);
+  });
+
+  bot.callbackQuery("batch_premium_start", async (ctx) => {
+    await ctx.answerCallbackQuery().catch(() => {});
+    const operatorId = ctx.from.id;
+    const state = pendingBatchPremium.get(operatorId);
+    if (!state) {
+      await ctx.reply("❌ Jarayon topilmadi.", { reply_markup: menuButton() });
+      return;
+    }
+    await startBatchPremiumExecution(ctx, operatorId, state);
+  });
+
+  // ── batch_premium execution function ─────────────────────────────────────────
+  async function startBatchPremiumExecution(ctx: any, operatorId: number, state: { totalRequested: number, selections: {cardId: number, uses: number}[] }) {
+    pendingBatchPremium.delete(operatorId); // Consume the state
+
     if (batchPremiumRunning.has(operatorId)) {
       await ctx.answerCallbackQuery("⏳ Premium jarayoni allaqachon davom etmoqda, kuting.").catch(() => {});
       return;
     }
 
-    const [cardRow] = await db.select().from(savedCards)
-      .where(and(eq(savedCards.id, cardId), eq(savedCards.userId, operatorId))).limit(1);
-    if (!cardRow) {
-      await ctx.answerCallbackQuery("❌ Karta topilmadi yoki sizga tegishli emas!").catch(() => {});
-      return;
-    }
-    const card = { cardNumber: cardRow.cardNumber, expiry: cardRow.expiry, cvv: cardRow.cvv, cardHolder: cardRow.cardHolder };
-
-    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-    const usages = await db.select().from(cardUsages).where(
-      and(eq(cardUsages.cardNumber, card.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgo)),
-    );
-    const usedNow = usages.length;
-    const actualLimit = Math.min(cardLimit, Math.max(0, 5 - usedNow));
-
-    if (actualLimit === 0) {
-      await ctx.answerCallbackQuery({ text: "⛔ Karta limiti tugagan (max 5/3kun).", show_alert: true }).catch(() => {});
-      return;
-    }
+    const requestedTotal = state.totalRequested;
+    let plannedUses = state.selections.reduce((acc, sel) => acc + sel.uses, 0);
 
     const now = new Date();
     const allSessions = await db.select().from(userbotSessions)
@@ -541,19 +615,33 @@ export function registerPremiumHandlers(bot: Bot): void {
       return;
     }
 
-    const actualTotal = Math.min(total, availableSessions.length);
-    if (total > availableSessions.length) {
+    const runCount = Math.min(plannedUses, availableSessions.length);
+    if (requestedTotal > availableSessions.length) {
       await ctx.answerCallbackQuery({
-        text: `⚠️ Mantiqiy xato: Siz ${total} ta so'radingiz, lekin atigi ${availableSessions.length} ta premiumsiz sessiya mavjud. Shular uchungina olinadi.`,
+        text: `⚠️ Mantiqiy xato: Siz ${requestedTotal} ta so'radingiz, lekin atigi ${availableSessions.length} ta premiumsiz sessiya mavjud. Shular uchungina olinadi.`,
         show_alert: true
       }).catch(() => {});
     } else {
-      await ctx.answerCallbackQuery(`⏳ ${actualTotal} ta sessiya uchun Premium olinmoqda...`).catch(() => {});
+      await ctx.answerCallbackQuery(`⏳ ${runCount} ta sessiya uchun Premium olinmoqda...`).catch(() => {});
     }
 
-    const runCount = Math.min(actualTotal, actualLimit);
     const targets = availableSessions.slice(0, runCount);
-    const remainingToRun = actualTotal - runCount;
+
+    // Assign each target session a specific card based on state.selections
+    const targetAssignments: { session: typeof availableSessions[0], cardId: number }[] = [];
+    let currentSelectionIndex = 0;
+    let usesAssignedFromCurrentSelection = 0;
+
+    for (const session of targets) {
+      const currentSelection = state.selections[currentSelectionIndex];
+      targetAssignments.push({ session, cardId: currentSelection.cardId });
+
+      usesAssignedFromCurrentSelection++;
+      if (usesAssignedFromCurrentSelection >= currentSelection.uses) {
+        currentSelectionIndex++;
+        usesAssignedFromCurrentSelection = 0;
+      }
+    }
 
     const chatId = ctx.chat!.id;
     let success = 0;
@@ -610,15 +698,29 @@ export function registerPremiumHandlers(bot: Bot): void {
       msgId = statusMsg.message_id;
 
       void (async () => {
-        const processOneTarget = async (session: (typeof targets)[number], step: number): Promise<void> => {
+        const processOneTarget = async (assignment: typeof targetAssignments[0], step: number): Promise<void> => {
+          const session = assignment.session;
+          const assignedCardId = assignment.cardId;
           const phone = session.phone;
           const relayIndex = step - 1;
+
+          const [cardRow] = await db.select().from(savedCards)
+            .where(and(eq(savedCards.id, assignedCardId), eq(savedCards.userId, operatorId))).limit(1);
+          if (!cardRow) {
+            failed++;
+            lines[step - 1] = `${step}. ❌ <code>${phone}</code> — Karta topilmadi`;
+            await updateProgress();
+            triggerRelayNext(relayIndex);
+            return;
+          }
+          const assignedCard = { cardNumber: cardRow.cardNumber, expiry: cardRow.expiry, cvv: cardRow.cvv, cardHolder: cardRow.cardHolder };
 
           await relayGates[relayIndex];
 
           if (activePremiumSessions.has(phone)) {
             lines[step - 1] = `${step}. ⏭ <code>${phone}</code> — boshqa operator ishlamoqda, o'tkazildi`;
             await updateProgress();
+            triggerRelayNext(relayIndex);
             return;
           }
           activePremiumSessions.add(phone);
@@ -627,8 +729,8 @@ export function registerPremiumHandlers(bot: Bot): void {
 
           let userClient: any = null;
           let restartCount = 0;
-          let activeCard = card;
-          let activeCardId = cardId;
+          let activeCard = assignedCard;
+          let activeCardId = assignedCardId;
           let activeCardLabel = cardRow.bankName ?? cardRow.cardHolder;
           let cardRetryCount = 0;
           const MAX_CARD_RETRIES = 3;
@@ -879,19 +981,13 @@ export function registerPremiumHandlers(bot: Bot): void {
           await updateProgress();
         };
 
-        await Promise.all(targets.map((t, idx) => processOneTarget(t, idx + 1)));
+        await Promise.all(targetAssignments.map((t, idx) => processOneTarget(t, idx + 1)));
 
         const summary =
           `${success > 0 ? "⭐" : "❌"} <b>Avto Premium yakunlandi!</b>\n\n✅ Muvaffaqiyat: <b>${success}</b> ta\n❌ Xato: <b>${failed}</b> ta\n\n${lines.filter(Boolean).join("\n")}`;
 
         const finishKb = new InlineKeyboard();
-        if (remainingToRun > 0) {
-          finishKb
-            .text(`Boshqa karta bilan yana ${remainingToRun} tasini olish`, `batch_premium:${remainingToRun}`).row()
-            .text("❌ Qolganini bekor qilish", "menu_home").row();
-        } else {
-          finishKb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
-        }
+        finishKb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 
         try {
           await ctx.api.editMessageText(chatId, msgId, summary, { parse_mode: "HTML", reply_markup: finishKb });
@@ -902,5 +998,5 @@ export function registerPremiumHandlers(bot: Bot): void {
     } finally {
       batchPremiumRunning.delete(operatorId);
     }
-  });
+  }
 }
