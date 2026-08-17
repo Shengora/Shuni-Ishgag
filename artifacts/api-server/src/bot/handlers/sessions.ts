@@ -97,17 +97,14 @@ export function registerSessionHandlers(bot: Bot): void {
     const uid = ctx.from!.id;
     if (!await isOperator(uid)) return;
 
-    const repreamBot = await getOperatorSource(uid);
-    const statusMsg = await ctx.reply(
-      `${E.CLOCK} @${repreamBot} dan raqam so'ralmoqda...`,
-      { parse_mode: "HTML" },
+    // Direct routing to the interactive menu which handles slots and bots
+    await ctx.reply(
+      `${E.ROBOT} <b>Raqam olish</b>\n\nDavom etish uchun quyidagi tugmani bosing:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("Boshlash", "menu_getnumber").icon(EID.OK).success(),
+      }
     );
-    const chatId = ctx.chat!.id;
-    const msgId = statusMsg.message_id;
-
-    void (async () => {
-      await doGetNumber(uid, ctx.api, chatId, msgId);
-    })();
   });
 
   // ── /list command ─────────────────────────────────────────────────────────
@@ -494,14 +491,16 @@ export function registerSessionHandlers(bot: Bot): void {
       return;
     }
 
-    await ctx.answerCallbackQuery("⏳ Yangi raqam olinmoqda...").catch(() => {});
+    await ctx.answerCallbackQuery().catch(() => {});
 
-    const newBot = await getOperatorSource(userId);
-    const statusMsg = await ctx.reply(`⏳ @${newBot} dan yangi raqam so'ralmoqda...`);
-
-    void (async () => {
-      await doGetNumber(userId, ctx.api, ctx.chat!.id, statusMsg.message_id);
-    })();
+    // Direct routing to the interactive menu which handles slots and bots
+    await ctx.reply(
+      `${E.ROBOT} <b>Raqam olish</b>\n\nDavom etish uchun quyidagi tugmani bosing:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("Boshlash", "menu_getnumber").icon(EID.OK).success(),
+      }
+    );
   });
 
   // ── menu_list callback ────────────────────────────────────────────────────

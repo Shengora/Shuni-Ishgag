@@ -64,6 +64,10 @@ export const activePremiumSessions = new Set<string>();
 // ── Per-operator manually selected source bot ─────────────────────────────────
 export const operatorSelectedSource = new Map<number, string>();
 
+// ── Per-operator manually selected master slot ────────────────────────────────
+export type SelectedSlot = { ownerId: number; slot: number };
+export const operatorSelectedSlot = new Map<number, SelectedSlot>();
+
 // ── Verifier input awaiting ────────────────────────────────────────────────────
 export const awaitingVerifierInput = new Set<number>();
 
