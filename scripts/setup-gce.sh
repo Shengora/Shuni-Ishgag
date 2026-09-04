@@ -26,7 +26,8 @@ fi
 # Corepack va Pnpm o'rnatish
 log "Pnpm o'rnatilmoqda..."
 sudo corepack enable
-sudo corepack prepare pnpm@latest --activate
+# Tizim Node 20 bo'lgani uchun pnpm 9 versiyasi eng stabil hisoblanadi
+sudo corepack prepare pnpm@9 --activate
 
 # PM2 o'rnatish (agar yo'q bo'lsa)
 log "PM2 va uning logrotate moduli o'rnatilmoqda..."
