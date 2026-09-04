@@ -42,10 +42,6 @@ else
     log "PM2 allaqachon o'rnatilgan."
 fi
 
-# Playwright uchun kerakli tizim paketlarini o'rnatish
-log "Playwright uchun kerakli tizim paketlari o'rnatilmoqda..."
-sudo npx -y playwright install-deps
-
 log "Kodni o'rnatish jildiga o'tilmoqda..."
 # Agar foydalanuvchi bu skriptni loyiha papkasidan tashqarida ishlatsa xato bo'lmasligi uchun:
 cd "$(dirname "$0")/.."
@@ -90,6 +86,11 @@ fi
 # Loyiha modullarini yuklash
 log "Pnpm orqali modullar yuklanmoqda..."
 pnpm install
+
+# Playwright brauzerlari va tizim paketlarini o'rnatish (npx ishlatmassiz)
+log "Playwright uchun kerakli brauzer va tizim paketlari o'rnatilmoqda..."
+pnpm exec playwright install chromium
+sudo pnpm exec playwright install-deps chromium
 
 # Build qilish
 log "Loyiha build qilinmoqda..."
