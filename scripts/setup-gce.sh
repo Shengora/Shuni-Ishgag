@@ -23,11 +23,12 @@ else
     log "Node.js allaqachon o'rnatilgan."
 fi
 
-# Corepack va Pnpm o'rnatish
-log "Pnpm o'rnatilmoqda..."
-sudo corepack enable
-# Tizim Node 20 bo'lgani uchun pnpm 9 versiyasi eng stabil hisoblanadi
-sudo corepack prepare pnpm@9 --activate
+# Pnpm o'rnatish
+log "Pnpm 9-versiyasi o'rnatilmoqda (Node 20 uchun stabil versiya)..."
+# Agar avval pnpm 10 o'rnatilgan bo'lsa (node:sqlite xatosi), uni o'chirib tashlaymiz
+sudo npm uninstall -g pnpm || true
+# To'g'ridan to'g'ri pnpm 9 ni o'rnatamiz
+sudo npm install -g pnpm@9
 
 # PM2 o'rnatish (agar yo'q bo'lsa)
 log "PM2 va uning logrotate moduli o'rnatilmoqda..."
