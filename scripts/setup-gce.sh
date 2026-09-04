@@ -73,6 +73,20 @@ EOF
     log ".env fayli muvaffaqiyatli yaratildi."
 fi
 
+# Env faylidan barcha o'zgaruvchilarni tizimga (export) yuklash
+log "Environment o'zgaruvchilari yuklanmoqda..."
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+fi
+
+# Agar BASE_PATH mavjud bo'lmasa, standart qiymat berish (mockup-sandbox build uchun kerak)
+if [ -z "$BASE_PATH" ]; then
+    export BASE_PATH="/"
+    log "BASE_PATH topilmadi, standart (/) qiymati berildi."
+fi
+
 # Loyiha modullarini yuklash
 log "Pnpm orqali modullar yuklanmoqda..."
 pnpm install
