@@ -138,16 +138,16 @@ const BROWSER_CLOSE_TIMEOUT_MS = 10_000;
 const PLAYWRIGHT_LAUNCH_TIMEOUT_MS = 30_000;
 
 // Never run more than this many headless browsers at once (env:
-// PLAYWRIGHT_MAX_CONCURRENCY). Lowered from 2→1 on request: this is the only
+// PLAYWRIGHT_MAX_CONCURRENCY).
 // gate around the actual card tokenization (open page → fill → submit), so
-// pinning it to 1 guarantees the bank never sees two card submissions at the
+// pinning it to a small number guarantees the bank never sees too many card submissions at the
 // same instant even while BATCH_CONCURRENCY lets other sessions run their
 // non-sensitive Telegram-only steps (get invoice, accept terms, wait for
 // 3DS/receipt) in parallel. Also still caps container memory use.
-const _rawMaxConc = parseInt(process.env.PLAYWRIGHT_MAX_CONCURRENCY ?? "1");
+const _rawMaxConc = parseInt(process.env.PLAYWRIGHT_MAX_CONCURRENCY ?? "5");
 const PLAYWRIGHT_MAX_CONCURRENCY = Number.isFinite(_rawMaxConc) && _rawMaxConc > 0
   ? _rawMaxConc
-  : 1;
+  : 5;
 
 // Lightweight async semaphore for the browser cap. releaseBrowserSlot hands the
 // freed slot directly to the next waiter so the active count stays exact even
@@ -158,7 +158,7 @@ const _browserWaitQueue: Array<() => void> = [];
  * `onQueued` fires only when the slot is NOT immediately available, so
  * callers can tell the operator "waiting in line" instead of the misleading
  * "entering card data" while nothing is actually happening for that session
- * yet (see PLAYWRIGHT_MAX_CONCURRENCY=1 mutex above).
+ * yet (see PLAYWRIGHT_MAX_CONCURRENCY mutex above).
  */
 async function acquireBrowserSlot(onQueued?: () => void): Promise<void> {
   if (_activeBrowsers < PLAYWRIGHT_MAX_CONCURRENCY) {
@@ -2661,12 +2661,11 @@ export async function runFullPremiumFlow(
       };
     }
   } else {
-    // Smart Glocal path — Playwright fills the web form. Only 1 browser can
-    // actually be filling/submitting a card at a time (PLAYWRIGHT_MAX_CONCURRENCY
+    // Smart Glocal path — Playwright fills the web form. Only up to PLAYWRIGHT_MAX_CONCURRENCY
+    // browsers can actually be filling/submitting a card at a time (PLAYWRIGHT_MAX_CONCURRENCY
     // mutex), so report "waiting in line" if another session currently holds
     // the slot, and only announce "entering card data" once this session
-    // actually has it — otherwise 3 sessions all show step 4 at once even
-    // though only one of them is doing anything.
+    // actually has it.
     const playwrightResult = await payPremiumViaWebApp(
       paymentFormInfo.url,
       card,
