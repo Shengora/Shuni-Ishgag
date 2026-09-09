@@ -348,6 +348,13 @@ export function registerBatchHandlers(bot: Bot): void {
               sessionString = await signInWithCodeAndPass(phone, phoneCodeHash, parsed.code, parsed.pass ?? null);
             } catch (err: any) {
               const msg: string = err?.errorMessage ?? err?.message ?? "";
+              if (msg.includes("PHONE_CODE_INVALID") || msg.includes("PHONE_CODE_EXPIRED")) {
+                logger.warn({ phone, msg }, "batch invalid or expired phone code");
+                await freezePending(pendingRow);
+                lines.push(`${step}. ${E.NO} <code>${phone}</code> — ${msg.includes("EXPIRED") ? "muddati o'tgan kod" : "provider bot yaroqsiz kod berdi"}`);
+                failed++;
+                continue;
+              }
               logger.error({ err, phone }, "batch signInWithCodeAndPass error");
               await notifyError(err, "batch signInWithCodeAndPass error", { phone });
               await freezePending(pendingRow);

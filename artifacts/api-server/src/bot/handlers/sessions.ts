@@ -461,6 +461,16 @@ export function registerSessionHandlers(bot: Bot): void {
         const msg: string = err?.errorMessage ?? err?.message ?? "";
         const needsPassword = msg.includes("PASSWORD_HASH_INVALID") || msg.includes("SESSION_PASSWORD_NEEDED");
 
+        if (msg.includes("PHONE_CODE_INVALID") || msg.includes("PHONE_CODE_EXPIRED")) {
+          logger.warn({ phone: pending[0].phone, msg }, "Invalid or expired phone code");
+          await autoFreezeAndNotify(
+            ctx,
+            pending[0],
+            msg.includes("EXPIRED") ? "Kodning muddati o'tgan" : "Provider bot yaroqsiz kod berdi"
+          );
+          return;
+        }
+
         if (needsPassword) {
           logger.warn({ phone: pending[0].phone, msg }, "signInWithCodeAndPass needs password");
           await db.update(pendingNumbers).set({ status: "awaiting_pass", otpCode: otp }).where(eq(pendingNumbers.id, pending[0].id));
