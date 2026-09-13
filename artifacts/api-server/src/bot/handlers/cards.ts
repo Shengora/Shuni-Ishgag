@@ -28,17 +28,24 @@ export function registerCardsHandlers(bot: Bot): void {
     const userId = ctx.from!.id;
     if (!await isOperator(userId)) return;
 
-    const parts = ctx.match?.trim().split(/\s+/);
-    // Expect: BANK_NOMI  CARD_NUMBER  MM/YY  CVV
-    if (!parts || parts.length < 4) {
+    const raw = ctx.match?.trim() || "";
+
+    // We expect 4 logical parts. However, since the user might enter spaces in the card number
+    // e.g. "BankName 1234 5678 1234 5678 12/26 123", we should process it gracefully.
+    // The last two parts are always Expiry and CVV.
+    const parts = raw.split(/\s+/);
+    if (parts.length < 4) {
       await ctx.reply(ADDCARD_USAGE, { parse_mode: "HTML" });
       return;
     }
 
     const bankName   = parts[0];
-    const cardNumber = parts[1].replace(/\D/g, "");
-    const expiryRaw  = parts[2]; // e.g. "12/26" or "1226"
-    const cvv        = parts[3];
+    const cvv        = parts[parts.length - 1];
+    const expiryRaw  = parts[parts.length - 2];
+
+    // The card number could be everything between the bankName and expiryRaw
+    const cardParts = parts.slice(1, parts.length - 2);
+    const cardNumber = cardParts.join("").replace(/\D/g, "");
 
     // Normalise to MM/YY canonical format (premium.ts expects "MM/YY" for split("/"))
     const expiryDigits = expiryRaw.replace(/\D/g, "");
