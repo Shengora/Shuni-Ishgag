@@ -382,8 +382,10 @@ export function registerSessionHandlers(bot: Bot): void {
       } catch (err: any) {
         const msg: string = err?.errorMessage ?? err?.message ?? "";
         const isFlood = msg.includes("FLOOD_WAIT") || msg.includes("FLOOD");
-        logger.error({ err }, "sendCodeForPhone error");
-        await notifyError(err, "sendCodeForPhone error");
+        if (!isFlood) {
+          logger.error({ err }, "sendCodeForPhone error");
+          await notifyError(err, "sendCodeForPhone error");
+        }
         await autoFreezeAndNotify(
           ctx,
           pending[0],
@@ -436,10 +438,13 @@ export function registerSessionHandlers(bot: Bot): void {
       logger.info({ phone: pending[0].phone, hasCode: !!parsed.code, hasPass: !!parsed.pass, hasNumber: !!parsed.number }, "Parsed repream code message");
 
       if (!parsed.code) {
+        const notFound = codeResponse.text.includes("Login Code NotFound");
         await autoFreezeAndNotify(
           ctx,
           pending[0],
-          `@${providerBot} Code maydoni bo'sh yoki topilmadi\n\n📩 Javob:\n<code>${codeResponse.text.slice(0, 200)}</code>`,
+          notFound
+            ? "Kod topilmadi (Manba botdan)"
+            : `@${providerBot} Code maydoni bo'sh yoki topilmadi\n\n📩 Javob:\n<code>${codeResponse.text.slice(0, 200)}</code>`,
         );
         return;
       }
@@ -460,6 +465,7 @@ export function registerSessionHandlers(bot: Bot): void {
       } catch (err: any) {
         const msg: string = err?.errorMessage ?? err?.message ?? "";
         const needsPassword = msg.includes("PASSWORD_HASH_INVALID") || msg.includes("SESSION_PASSWORD_NEEDED");
+        const invalidCode = msg.includes("PHONE_CODE_INVALID") || msg.includes("PHONE_CODE_EXPIRED");
 
         if (needsPassword) {
           logger.warn({ phone: pending[0].phone, msg }, "signInWithCodeAndPass needs password");
@@ -470,6 +476,11 @@ export function registerSessionHandlers(bot: Bot): void {
               : `🔐 <b>2FA parol kerak!</b>\n\nHisobda ikki bosqichli tasdiqlash yoqilgan.\n\nParolingizni kiriting:\n/pass <code>parolingiz</code>`,
             { parse_mode: "HTML" },
           );
+          return;
+        }
+
+        if (invalidCode) {
+          await autoFreezeAndNotify(ctx, pending[0], msg.includes("PHONE_CODE_EXPIRED") ? "Kod muddati o'tgan" : "Noto'g'ri kod");
           return;
         }
 

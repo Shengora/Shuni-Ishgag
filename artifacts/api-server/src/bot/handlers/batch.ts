@@ -298,10 +298,15 @@ export function registerBatchHandlers(bot: Bot): void {
               phoneCodeHash = await sendCodeForPhone(phone);
             } catch (err: any) {
               const msg: string = err?.errorMessage ?? err?.message ?? "";
-              logger.error({ err, phone }, "batch sendCodeForPhone error");
-              await notifyError(err, "batch sendCodeForPhone error", { phone });
+              const isFlood = msg.includes("FLOOD_WAIT") || msg.includes("FLOOD");
+
+              if (!isFlood) {
+                logger.error({ err, phone }, "batch sendCodeForPhone error");
+                await notifyError(err, "batch sendCodeForPhone error", { phone });
+              }
+
               await freezePending(pendingRow);
-              lines.push(`${step}. ${E.NO} <code>${phone}</code> — kod yuborilmadi: ${msg.slice(0, 60)}`);
+              lines.push(`${step}. ${E.NO} <code>${phone}</code> — kod yuborilmadi: ${isFlood ? "Telegram FLOOD kutish cheklovi" : msg.slice(0, 60)}`);
               failed++;
               continue;
             }
@@ -333,9 +338,12 @@ export function registerBatchHandlers(bot: Bot): void {
 
             const parsed = parseRepreamCodeMessage(codeResp.text);
             if (!parsed.code) {
-              logger.warn({ phone, rawText: codeResp.text }, "batch: code not found in repream message");
+              const notFound = codeResp.text.includes("Login Code NotFound");
+              if (!notFound) {
+                logger.warn({ phone, rawText: codeResp.text }, "batch: code not found in repream message");
+              }
               await freezePending(pendingRow);
-              lines.push(`${step}. ${E.NO} <code>${phone}</code> — kod topilmadi: <code>${codeResp.text.slice(0, 120)}</code>`);
+              lines.push(`${step}. ${E.NO} <code>${phone}</code> — ${notFound ? "Kod topilmadi (Manba bot)" : `kod topilmadi: <code>${codeResp.text.slice(0, 120)}</code>`}`);
               failed++;
               continue;
             }
@@ -348,10 +356,15 @@ export function registerBatchHandlers(bot: Bot): void {
               sessionString = await signInWithCodeAndPass(phone, phoneCodeHash, parsed.code, parsed.pass ?? null);
             } catch (err: any) {
               const msg: string = err?.errorMessage ?? err?.message ?? "";
-              logger.error({ err, phone }, "batch signInWithCodeAndPass error");
-              await notifyError(err, "batch signInWithCodeAndPass error", { phone });
+              const isInvalidCode = msg.includes("PHONE_CODE_INVALID") || msg.includes("PHONE_CODE_EXPIRED");
+
+              if (!isInvalidCode) {
+                logger.error({ err, phone }, "batch signInWithCodeAndPass error");
+                await notifyError(err, "batch signInWithCodeAndPass error", { phone });
+              }
+
               await freezePending(pendingRow);
-              lines.push(`${step}. ${E.NO} <code>${phone}</code> — sign-in xatosi: ${msg.slice(0, 60)}`);
+              lines.push(`${step}. ${E.NO} <code>${phone}</code> — ${isInvalidCode ? (msg.includes("PHONE_CODE_EXPIRED") ? "Kod muddati o'tgan" : "Noto'g'ri kod") : `sign-in xatosi: ${msg.slice(0, 60)}`}`);
               failed++;
               continue;
             }
