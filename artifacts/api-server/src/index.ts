@@ -82,10 +82,7 @@ const server = app.listen(port, (err) => {
 // In development, DEV_BOT_TOKEN (a separate @BotFather bot) is preferred over
 // BOT_TOKEN so the dev process never polls the same token as production — see
 // resolveBotToken() in bot.ts for why that split matters.
-const isDevEnv = process.env.NODE_ENV !== "production";
-const hasUsableBotToken = isDevEnv
-  ? Boolean(process.env.DEV_BOT_TOKEN || process.env.BOT_TOKEN)
-  : Boolean(process.env.BOT_TOKEN);
+const hasUsableBotToken = Boolean(process.env.BOT_TOKEN);
 
 let bot: ReturnType<typeof createBot> | undefined;
 let runner: RunnerHandle | undefined;

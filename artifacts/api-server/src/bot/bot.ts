@@ -51,16 +51,6 @@ import { registerVerifierHandlers } from "./handlers/verifiers.js";
 // the two processes and break. DEV_BOT_TOKEN (a separate @BotFather bot used
 // only for local testing) keeps dev traffic completely isolated from prod.
 function resolveBotToken(): string {
-  const isDev = process.env.NODE_ENV !== "production";
-  if (isDev) {
-    const devToken = process.env.DEV_BOT_TOKEN;
-    if (devToken) return devToken;
-    logger.warn(
-      "DEV_BOT_TOKEN not set — falling back to BOT_TOKEN in development. " +
-        "This means dev and production will poll the same bot and can interfere " +
-        "with real user flows. Set DEV_BOT_TOKEN to a separate @BotFather bot.",
-    );
-  }
   const token = process.env.BOT_TOKEN;
   if (!token) throw new Error("BOT_TOKEN env var is required");
   return token;
