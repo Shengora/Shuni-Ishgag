@@ -1,0 +1,662 @@
+diff --git a/.env.example b/.env.example
+index 1b7122c..d9f122e 100644
+--- a/.env.example
++++ b/.env.example
+@@ -13,6 +13,10 @@ DEV_BOT_TOKEN=your_dev_telegram_bot_token_here
+ # Super Admin ning Telegram ID si (Raqamli formatda)
+ SUPER_ADMIN_ID=123456789
+
++# Telegram API ID va API Hash (my.telegram.org dan olinadi, MTProto ulash uchun kerak)
++API_ID=1234567
++API_HASH=your_api_hash_here
++
+ # Ma'lumotlar bazasi URL manzili (Supabase, Neon yoki mahalliy PostgreSQL uchun)
+ # PostgreSQL Connection String formatida
+ DATABASE_URL=postgres://user:password@host:port/dbname
+diff --git a/artifacts/api-server/src/bot/client.ts b/artifacts/api-server/src/bot/client.ts
+index 2dee076..77fa22e 100644
+--- a/artifacts/api-server/src/bot/client.ts
++++ b/artifacts/api-server/src/bot/client.ts
+@@ -46,7 +46,7 @@ function enqueueSendCommand<T>(client: TelegramClient, fn: () => Promise<T>): Pr
+ // Pending (not-yet-authorized) login clients, keyed by "${operatorId}:${slot}"
+ // so a super admin can run up to 3 parallel login flows simultaneously.
+ const _pendingClients = new Map<string, { client: TelegramClient; createdAt: number }>();
+-const PENDING_CLIENT_TTL_MS = 15 * 60 * 1000; // abandoned login attempts expire after 15 min
++const PENDING_CLIENT_TTL_MS = 60 * 60 * 1000; // abandoned login attempts expire after 1 hr
+
+ /** Returns the pending-client map key for a given operator + slot. */
+ function pKey(operatorId: number, slot: number): string { return `${operatorId}:${slot}`; }
+@@ -140,8 +140,8 @@ export async function markUserbotSessionInvalid(phone: string, reason: string):
+   }
+ }
+
+-const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
+-const INVALID_SESSION_GRACE_MS = 24 * 60 * 60 * 1000; // keep invalid rows visible for 24h before purging
++const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // every 1 hours
++const INVALID_SESSION_GRACE_MS = 60 * 60 * 1000; // keep invalid rows visible for 1h before purging
+
+ let _cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+@@ -193,6 +193,32 @@ export function startUserbotSessionCleanup(): void {
+  * Sessions that error for any other reason (timeout, flood wait, proxy issue)
+  * are left untouched — only a confirmed invalid-session signature counts as dead.
+  */
++export async function checkPremiumBotSpam(sessionString: string, premiumBotUsername: string): Promise<boolean> {
++  const client = await createClientFromSession(sessionString);
++  try {
++    const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
++    const msgs = await client.getMessages(premiumBotUsername, { limit: 100 });
++    let startCount = 0;
++
++    for (const msg of msgs) {
++      if (msg.date * 1000 < twoDaysAgo) break;
++      if (msg.out && msg.message?.trim().startsWith("/start")) {
++        startCount++;
++      }
++    }
++    return startCount > 2;
++  } catch (err: any) {
++    if (err.message?.includes("CHANNEL_PRIVATE") || err.message?.includes("USERNAME_NOT_OCCUPIED")) {
++      return false; // Not interacted or bot deleted
++    }
++    throw err;
++  } finally {
++    try {
++      await client.disconnect();
++    } catch (_) {}
++  }
++}
++
+ export async function verifyAndPurgeDeadSessions(
+   onProgress?: (checked: number, total: number, phone: string) => void,
+   skipPhones?: Set<string>,
+diff --git a/artifacts/api-server/src/bot/handlers/cards.ts b/artifacts/api-server/src/bot/handlers/cards.ts
+index 74ccc5d..0204eac 100644
+--- a/artifacts/api-server/src/bot/handlers/cards.ts
++++ b/artifacts/api-server/src/bot/handlers/cards.ts
+@@ -5,8 +5,8 @@
+  */
+ import { Bot, InlineKeyboard } from "grammy";
+ import { db } from "@workspace/db";
+-import { savedCards } from "@workspace/db";
+-import { eq, and, desc } from "drizzle-orm";
++import { savedCards, cardUsages, proxySettings } from "@workspace/db";
++import { eq, and, desc, gte } from "drizzle-orm";
+ import { logger } from "../../lib/logger.js";
+ import { E, EID } from "../../lib/emoji.js";
+ import { recordStat } from "../super-admin.js";
+@@ -132,6 +132,10 @@ export function registerCardsHandlers(bot: Bot): void {
+       return;
+     }
+
++    const [proxyRow] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
++    const cardLimitDays = proxyRow?.cardLimitDays ?? 3;
++    const periodStart = new Date(Date.now() - cardLimitDays * 24 * 60 * 60 * 1000);
++
+     const kb = new InlineKeyboard();
+     for (const c of cards) {
+       const last4  = c.cardNumber.slice(-4);
+@@ -141,12 +145,18 @@ export function registerCardsHandlers(bot: Bot): void {
+     kb.text("Karta qo'shish", "menu_addcard").icon(EID.ADD).success()
+       .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+
++    const lines: string[] = [];
++    for (const c of cards) {
++      const usages = await db.select().from(cardUsages).where(
++        and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, userId), gte(cardUsages.usedAt, periodStart))
++      );
++      const used = usages.length;
++      const def = c.isDefault ? ` ${E.STAR} asosiy` : "";
++      lines.push(`• ****${c.cardNumber.slice(-4)} (${c.expiry}) — ${used}/5 (limit)${def}`);
++    }
++
+     await reply(
+-      `${E.CARD} <b>Saqlangan kartalar</b> (${cards.length} ta):\n\n` +
+-        cards.map(c => {
+-          const def = c.isDefault ? ` ${E.STAR} asosiy` : "";
+-          return `• ****${c.cardNumber.slice(-4)} (${c.expiry})${def}`;
+-        }).join("\n"),
++      `${E.CARD} <b>Saqlangan kartalar</b> (${cards.length} ta):\n\n` + lines.join("\n"),
+       { parse_mode: "HTML", reply_markup: kb },
+     );
+   };
+diff --git a/artifacts/api-server/src/bot/handlers/premium.ts b/artifacts/api-server/src/bot/handlers/premium.ts
+index 0f80d16..6ba1074 100644
+--- a/artifacts/api-server/src/bot/handlers/premium.ts
++++ b/artifacts/api-server/src/bot/handlers/premium.ts
+@@ -12,6 +12,7 @@ import { eq, and, desc, gte } from "drizzle-orm";
+ import { logger } from "../../lib/logger.js";
+ import { E, EID } from "../../lib/emoji.js";
+ import { recordStat } from "../super-admin.js";
++import { proxySettings } from "@workspace/db";
+ import {
+   getMasterClient,
+   createClientFromSession,
+@@ -416,13 +417,16 @@ export function registerPremiumHandlers(bot: Bot): void {
+       selectedCount = selectedSoFar;
+     }
+
+-    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
++    const [proxyRow] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
++    const cardLimitDays = proxyRow?.cardLimitDays ?? 3;
++    const periodStart = new Date(Date.now() - cardLimitDays * 24 * 60 * 60 * 1000);
++
+     const kb = new InlineKeyboard();
+     const lines: string[] = [];
+
+     for (const c of cards) {
+       const usages = await db.select().from(cardUsages).where(
+-        and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgo)),
++        and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, periodStart)),
+       );
+       // Also consider uses already requested in current pending state
+       let pendingUses = 0;
+@@ -509,29 +513,32 @@ export function registerPremiumHandlers(bot: Bot): void {
+     const selectedSoFar = state.selections.reduce((acc, sel) => acc + sel.uses, 0);
+     const remainingToSelect = total - selectedSoFar;
+
+-    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
++    const [proxyRow] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
++    const cardLimitDays = proxyRow?.cardLimitDays ?? 3;
++    const periodStart = new Date(Date.now() - cardLimitDays * 24 * 60 * 60 * 1000);
++
+     const usages = await db.select().from(cardUsages).where(
+-      and(eq(cardUsages.cardNumber, cardRow.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgo)),
++      and(eq(cardUsages.cardNumber, cardRow.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, periodStart)),
+     );
+
+     const pendingUses = state.selections.filter((s) => s.cardId === cardId).reduce((acc, s) => acc + s.uses, 0);
+-    const usedIn3Days = usages.length + pendingUses;
+-    const remaining = Math.max(0, 5 - usedIn3Days);
++    const usedInPeriod = usages.length + pendingUses;
++    const remaining = Math.max(0, 5 - usedInPeriod);
+     const label = cardRow.bankName ?? cardRow.cardHolder;
+
+     await ctx.answerCallbackQuery().catch(() => {});
+
+     if (remaining === 0) {
+       await ctx.reply(
+-        `⛔ <b>Karta limiti tugagan</b>\n\n💳 <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi 3 kunda allaqachon <b>5 marta</b> ishlatilgan (yoki navbatga qo'yilgan).\n\n🕐 Limit yangilanishi uchun kuting yoki boshqa karta tanlang.`,
++        `⛔ <b>Karta limiti tugagan</b>\n\n💳 <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi ${cardLimitDays} kunda allaqachon <b>5 marta</b> ishlatilgan (yoki navbatga qo'yilgan).\n\n🕐 Limit yangilanishi uchun kuting yoki boshqa karta tanlang.`,
+         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("◀️ Kartalar", `batch_premium_next`).text("🏠 Bosh menyu", "menu_home") },
+       );
+       return;
+     }
+
+     await ctx.reply(
+-      `💳 <b>Nechta obuna olish kerak?</b>\n\nKarta: <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi 3 kunda: <b>${usedIn3Days}/5</b> marta ishlatilgan (kutilyotgan bilan)\nQolgan: <b>${remaining} ta</b>\n\n<i>Bu karta bilan yana nechta raqamga Premium olish kerak?</i>\nJami tanlanishi kerak bo'lganlar: <b>${remainingToSelect}</b> ta.`,
+-      { parse_mode: "HTML", reply_markup: cardUsagePickerKeyboard(total, usedIn3Days, cardId, remainingToSelect) },
++      `💳 <b>Nechta obuna olish kerak?</b>\n\nKarta: <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi ${cardLimitDays} kunda: <b>${usedInPeriod}/5</b> marta ishlatilgan (kutilyotgan bilan)\nQolgan: <b>${remaining} ta</b>\n\n<i>Bu karta bilan yana nechta raqamga Premium olish kerak?</i>\nJami tanlanishi kerak bo'lganlar: <b>${remainingToSelect}</b> ta.`,
++      { parse_mode: "HTML", reply_markup: cardUsagePickerKeyboard(total, usedInPeriod, cardId, remainingToSelect) },
+     );
+   });
+
+@@ -875,14 +882,16 @@ export function registerPremiumHandlers(bot: Bot): void {
+
+                 // Offer another card after exhausted same-card retries
+                 if (result.paymentDeclined && cardRetryCount < MAX_CARD_RETRIES) {
+-                  const threeDaysAgoRetry = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
++                  const [proxyRow] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
++                  const cardLimitDays = proxyRow?.cardLimitDays ?? 3;
++                  const periodStartRetry = new Date(Date.now() - cardLimitDays * 24 * 60 * 60 * 1000);
+                   const otherCards = await db.select().from(savedCards).where(eq(savedCards.userId, operatorId)).orderBy(desc(savedCards.createdAt));
+
+                   const usable: typeof otherCards = [];
+                   for (const c of otherCards) {
+                     if (c.id === activeCardId) continue;
+                     const cu = await db.select().from(cardUsages).where(
+-                      and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgoRetry)),
++                      and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, periodStartRetry)),
+                     );
+                     if (cu.length < 5) usable.push(c);
+                   }
+diff --git a/artifacts/api-server/src/bot/handlers/sessions.ts b/artifacts/api-server/src/bot/handlers/sessions.ts
+index d8bbaee..316db48 100644
+--- a/artifacts/api-server/src/bot/handlers/sessions.ts
++++ b/artifacts/api-server/src/bot/handlers/sessions.ts
+@@ -20,6 +20,7 @@ import {
+   parseRepreamCodeMessage,
+   signInWithCodeAndPass,
+   verifyAndPurgeDeadSessions,
++  checkPremiumBotSpam,
+ } from "../client.js";
+ import { notifyError } from "../notify.js";
+ import {
+@@ -142,6 +143,7 @@ export function registerSessionHandlers(bot: Bot): void {
+       kb.text(`❌ ${s.phone}`, `delsession:${s.phone}`).row();
+     }
+     kb.text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger().row();
++    kb.text("Startlarni tekshirish", "menu_check_spam").icon(EID.LOCK).danger().row();
+     kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+
+     await ctx.reply(
+@@ -549,6 +551,7 @@ export function registerSessionHandlers(bot: Bot): void {
+       kb.text(`❌ ${s.phone}`, `delsession:${s.phone}`).row();
+     }
+     kb.text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger().row();
++    kb.text("Startlarni tekshirish", "menu_check_spam").icon(EID.LOCK).danger().row();
+     kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+
+     await ctx.reply(
+@@ -631,6 +634,7 @@ export function registerSessionHandlers(bot: Bot): void {
+       kb.text(`❌ ${s.phone}`, `delsession:${s.phone}`).row();
+     }
+     kb.text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger().row();
++    kb.text("Startlarni tekshirish", "menu_check_spam").icon(EID.LOCK).danger().row();
+     kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+
+     await ctx.editMessageText(
+@@ -667,4 +671,123 @@ export function registerSessionHandlers(bot: Bot): void {
+       })
+       .catch(() => ctx.reply(summary, { parse_mode: "HTML", reply_markup: menuButton() }));
+   });
++
++  // ── menu_check_spam callback ───────────────────────────────────────────────
++  bot.callbackQuery("menu_check_spam", async (ctx) => {
++    await ctx.answerCallbackQuery().catch(() => {});
++    const ownerId = ctx.from.id;
++
++    const sessions = await db.select().from(userbotSessions)
++      .where(and(eq(userbotSessions.status, "active"), eq(userbotSessions.ownerId, ownerId)));
++
++    if (sessions.length === 0) {
++      await ctx.reply("❌ Faol sessiyalar topilmadi.", { reply_markup: menuButton() });
++      return;
++    }
++
++    const statusMsg = await ctx.reply("🔍 Spam startlar tekshirilmoqda...\n<i>Bu biroz vaqt olishi mumkin</i>", { parse_mode: "HTML" });
++
++    const spamPhones: string[] = [];
++    let checked = 0;
++    let lastEdit = Date.now();
++
++    for (const s of sessions) {
++      if (activePremiumSessions.has(s.phone)) {
++        checked++;
++        continue;
++      }
++      try {
++        const isSpam = await checkPremiumBotSpam(s.sessionString, PREMIUM_BOT);
++        if (isSpam) {
++          spamPhones.push(s.phone);
++        }
++      } catch (err) {
++        logger.warn({ phone: s.phone, err }, "checkPremiumBotSpam error");
++      }
++      checked++;
++
++      const now = Date.now();
++      if (now - lastEdit > 2000 && checked < sessions.length) {
++        lastEdit = now;
++        ctx.api.editMessageText(statusMsg.chat.id, statusMsg.message_id, `🔍 Tekshirilmoqda: ${checked}/${sessions.length}...`).catch(() => {});
++      }
++    }
++
++    if (spamPhones.length === 0) {
++      await ctx.api.editMessageText(statusMsg.chat.id, statusMsg.message_id, "✅ So'nggi 2 kun ichida ko'p /start bosilgan yaroqsiz sessiyalar topilmadi.", { reply_markup: menuButton() }).catch(() => {});
++      return;
++    }
++
++    // Temporary storage in a local map to avoid large callback data strings
++    const spamPhonesStr = spamPhones.join(",");
++    const kb = new InlineKeyboard()
++      .text("O'chirishni tasdiqlash", `confirm_del_spam:${spamPhones.length}`)
++      .row()
++      .text("Bekor qilish", "menu_list");
++
++    const stateId = Date.now().toString();
++    (global as any)[`spam_state_${stateId}`] = spamPhones;
++
++    const kb2 = new InlineKeyboard()
++      .text("✅ Ha, o'chirish va freeze qilish", `del_spam:${stateId}`).icon(EID.TRASH).danger()
++      .row()
++      .text("❌ Yo'q", "menu_list").icon(EID.NO).primary();
++
++    await ctx.api.editMessageText(
++      statusMsg.chat.id,
++      statusMsg.message_id,
++      `⚠️ <b>Spam Sessiyalar topildi!</b>\n\nQuyidagi <b>${spamPhones.length}</b> ta raqam oxirgi 2 kunda 2 tadan ko'p /start bosgan:\n\n${spamPhones.map(p => `• <code>${p}</code>`).join("\n")}\n\nUshbu sessiyalarni bazadan o'chirib yuboraymi (va manba botda ularni freeze qilaymi)?`,
++      { parse_mode: "HTML", reply_markup: kb2 }
++    ).catch(() => {});
++  });
++
++  bot.callbackQuery(/^del_spam:(.+)$/, async (ctx) => {
++    await ctx.answerCallbackQuery().catch(() => {});
++    const stateId = ctx.match[1];
++    const spamPhones: string[] = (global as any)[`spam_state_${stateId}`];
++
++    if (!spamPhones || !Array.isArray(spamPhones)) {
++      await ctx.editMessageText("❌ So'rov eskirgan yoki xato. Iltimos qayta urinib ko'ring.", { reply_markup: menuButton() }).catch(() => {});
++      return;
++    }
++
++    const statusMsg = await ctx.reply("🧹 O'chirilmoqda va freeze qilinmoqda...");
++
++    let deleted = 0;
++    let frozen = 0;
++
++    for (const phone of spamPhones) {
++      // Find pendingNumbers row to freeze
++      const pendingRows = await db.select().from(pendingNumbers).where(eq(pendingNumbers.phone, phone)).limit(1);
++
++      // Delete session
++      await db.delete(userbotSessions).where(eq(userbotSessions.phone, phone));
++      deleted++;
++
++      if (pendingRows.length > 0) {
++        const row = pendingRows[0];
++        const masterClient = await getMasterClient(ctx.from.id);
++        const botName = row.providerBot || DEFAULT_REPREAM_BOT;
++
++        if (masterClient && row.repreamMessageId && row.freezeData) {
++          try {
++            await clickRepreamButton(masterClient, botName, Number(row.repreamMessageId), row.freezeData);
++            frozen++;
++          } catch (e) {
++            logger.warn({ e, phone }, "Failed to click freeze button during spam cleanup");
++          }
++        }
++        await db.update(pendingNumbers).set({ status: "frozen" }).where(eq(pendingNumbers.id, row.id));
++      }
++    }
++
++    delete (global as any)[`spam_state_${stateId}`];
++
++    await ctx.api.editMessageText(
++      statusMsg.chat.id,
++      statusMsg.message_id,
++      `✅ <b>Yakunlandi!</b>\n\n🗑 O'chirilgan sessiyalar: <b>${deleted}</b> ta\n🧊 Freeze qilingan raqamlar: <b>${frozen}</b> ta`,
++      { parse_mode: "HTML", reply_markup: menuButton() }
++    ).catch(() => {});
++  });
+ }
+diff --git a/artifacts/api-server/src/bot/handlers/shared.ts b/artifacts/api-server/src/bot/handlers/shared.ts
+index 0016b66..3925c36 100644
+--- a/artifacts/api-server/src/bot/handlers/shared.ts
++++ b/artifacts/api-server/src/bot/handlers/shared.ts
+@@ -103,7 +103,7 @@ export function trackCrTs(id: string): void       { _crTs.set(id, Date.now()); }
+ export function clearCrTs(id: string): void       { _crTs.delete(id); }
+
+ const TTL_CLEANUP_INTERVAL_MS = 5 * 60_000;   // run every 5 min
+-const STALE_THRESHOLD_MS      = 15 * 60_000;  // expire entries older than 15 min
++const STALE_THRESHOLD_MS      = 60 * 60_000;  // expire entries older than 1 hr
+
+ /** Start the background TTL cleanup job. Call once on bot startup. */
+ export function startCallbackMapCleanup(): void {
+@@ -220,8 +220,8 @@ export function premiumPickerKeyboard(): InlineKeyboard {
+     .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
+ }
+
+-export function cardUsagePickerKeyboard(sessionCount: number, usedIn3Days: number, cardId: number, remainingToSelect: number): InlineKeyboard {
+-  const remaining = Math.max(0, 5 - usedIn3Days);
++export function cardUsagePickerKeyboard(sessionCount: number, usedInPeriod: number, cardId: number, remainingToSelect: number): InlineKeyboard {
++  const remaining = Math.max(0, 5 - usedInPeriod);
+   const kb = new InlineKeyboard();
+   const maxOptions = Math.min(5, remainingToSelect);
+
+diff --git a/artifacts/api-server/src/bot/super-admin.ts b/artifacts/api-server/src/bot/super-admin.ts
+index 86476c1..14f85a8 100644
+--- a/artifacts/api-server/src/bot/super-admin.ts
++++ b/artifacts/api-server/src/bot/super-admin.ts
+@@ -524,6 +524,7 @@ const awaitingBroadcastInput = new Set<number>();
+ const awaitingSAInput    = new Map<number, number>(); // superAdminId → promptMsgId (add super admin)
+ const awaitingIpInput    = new Map<number, number>(); // superAdminId → promptMsgId
+ const awaitingLimitInput = new Map<number, number>(); // superAdminId → promptMsgId
++const awaitingCardLimitInput = new Map<number, number>(); // superAdminId → promptMsgId
+ const awaitingIpDelete   = new Map<number, number>(); // superAdminId → promptMsgId (delete proxy by IP)
+
+ // ── Register function ─────────────────────────────────────────────────────────
+@@ -1038,7 +1039,8 @@ export function registerSuperAdminCommands(bot: Bot): void {
+   // ── sa_proxy_limit — show current limit + prompt to change ──────────────────
+   bot.callbackQuery("sa_proxy_limit", requireSA, async (ctx) => {
+     await ctx.answerCallbackQuery();
+-    const maxUses = await getMaxUses();
++    const settings = await getProxySettings();
++    const maxUses = settings.maxUses;
+     const msg = await ctx.reply(
+       `⚙️ <b>Har IP uchun limit</b>\n\n` +
+       `Hozirgi qiymat: <b>${maxUses} ta</b>\n\n` +
+@@ -1051,6 +1053,20 @@ export function registerSuperAdminCommands(bot: Bot): void {
+     awaitingLimitInput.set(ctx.from.id, msg.message_id);
+   });
+
++  // ── sa_card_limit — prompt for cardLimitDays ─────────────────────────────
++  bot.callbackQuery("sa_card_limit", requireSA, async (ctx) => {
++    await ctx.answerCallbackQuery();
++    const settings = await getProxySettings();
++    const msg = await ctx.reply(
++      `⏱ <b>Karta Limiti Yangilanish Muddati</b>\n\nKarta 5 marta ishlatilgandan so'ng, necha kun ichida limit yana 0 ga tushishini belgilang.\nHozirgi qiymat: <b>${settings.cardLimitDays} kun</b>\n\n<i>Yangi muddatni yozib yuboring (masalan: <code>3</code>)</i>`,
++      {
++        parse_mode: "HTML",
++        reply_markup: new InlineKeyboard().text("❌ Bekor", "sa_proxy"),
++      },
++    );
++    awaitingCardLimitInput.set(ctx.from.id, msg.message_id);
++  });
++
+   // ── Unified text handler — admin ID add OR proxy IP add OR limit set ──────────
+   bot.on("message:text", async (ctx, next) => {
+     if (!ctx.from || !(await isAnySuperAdmin(ctx.from.id))) return next();
+@@ -1063,6 +1079,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
+       awaitingAdminInput.delete(uid);
+       awaitingIpInput.delete(uid);
+       awaitingLimitInput.delete(uid);
++      awaitingCardLimitInput.delete(uid);
+       awaitingSAInput.delete(uid);
+
+       const targetIp = ctx.message.text.trim();
+@@ -1097,6 +1114,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
+       // Cancel any stale flows so there's no leftover state
+       awaitingAdminInput.delete(uid);
+       awaitingLimitInput.delete(uid);
++      awaitingCardLimitInput.delete(uid);
+       awaitingSAInput.delete(uid);
+       awaitingIpDelete.delete(uid);
+
+@@ -1178,6 +1196,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
+       awaitingLimitInput.delete(uid);
+       awaitingAdminInput.delete(uid);
+       awaitingIpInput.delete(uid);
++      awaitingCardLimitInput.delete(uid);
+       awaitingSAInput.delete(uid);
+       awaitingIpDelete.delete(uid);
+
+@@ -1206,6 +1225,41 @@ export function registerSuperAdminCommands(bot: Bot): void {
+       return;
+     }
+
++    // ── Branch B2: awaiting card limit input ──────────────────────────────────
++    if (awaitingCardLimitInput.has(uid)) {
++      const promptMsgId = awaitingCardLimitInput.get(uid)!;
++      awaitingCardLimitInput.delete(uid);
++      awaitingAdminInput.delete(uid);
++      awaitingIpInput.delete(uid);
++      awaitingLimitInput.delete(uid);
++      awaitingSAInput.delete(uid);
++      awaitingIpDelete.delete(uid);
++
++      const val = parseInt(ctx.message.text.trim(), 10);
++      if (isNaN(val) || val < 1 || val > 365) {
++        await ctx.reply(
++          `❌ Noto'g'ri qiymat. 1 dan 365 gacha raqam kiriting.`,
++          { parse_mode: "HTML" },
++        );
++        return;
++      }
++      try {
++        await ctx.api.deleteMessage(ctx.chat.id, promptMsgId).catch(() => {});
++        await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
++        await db
++          .insert(proxySettings)
++          .values({ id: 1, cardLimitDays: val })
++          .onConflictDoUpdate({ target: proxySettings.id, set: { cardLimitDays: val, updatedAt: new Date() } });
++        const { text, kb } = await buildProxyPanel();
++        await ctx.reply(`✅ Karta limiti muddati <b>${val} kun</b> ga o'zgartirildi!\n\n` + text, { parse_mode: "HTML", reply_markup: kb });
++      } catch (err: any) {
++        logger.error({ err }, "sa card limit set error");
++        await notifyError(err, "sa card limit set error");
++        await ctx.reply(`❌ Xato: ${err.message}`);
++      }
++      return; // consumed
++    }
++
+     // ── Branch D: awaiting super admin ID input ───────────────────────────────
+     if (awaitingSAInput.has(uid)) {
+       const promptMsgId = awaitingSAInput.get(uid)!;
+@@ -1213,6 +1267,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
+       awaitingAdminInput.delete(uid);
+       awaitingIpInput.delete(uid);
+       awaitingLimitInput.delete(uid);
++      awaitingCardLimitInput.delete(uid);
+       awaitingIpDelete.delete(uid);
+
+       const targetId = Number(ctx.message.text.trim());
+@@ -1347,18 +1402,28 @@ export function registerSuperAdminCommands(bot: Bot): void {
+   // ── 🌐 PROKSI IP BOSHQARUV ────────────────────────────────────────────────
+   // ══════════════════════════════════════════════════════════════════════════
+
+-  // Helper: read global maxUses from DB
+-  async function getMaxUses(): Promise<number> {
++  // Helper: read global proxySettings from DB
++  async function getProxySettings() {
+     const [row] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
+-    return row?.maxUses ?? 8;
++    return {
++      maxUses: row?.maxUses ?? 8,
++      cardLimitDays: row?.cardLimitDays ?? 3,
++    };
++  }
++
++  // Keep getMaxUses for existing callers if necessary or replace
++  async function getMaxUses(): Promise<number> {
++    const { maxUses } = await getProxySettings();
++    return maxUses;
+   }
+
+   // Helper: build proxy overview text + keyboard
+   async function buildProxyPanel() {
+-    const [rawRows, maxUses] = await Promise.all([
++    const [rawRows, settings] = await Promise.all([
+       db.select().from(proxyIps).orderBy(asc(proxyIps.usedCount)),
+-      getMaxUses(),
++      getProxySettings(),
+     ]);
++    const { maxUses, cardLimitDays } = settings;
+     const { inFlight, cooldowns } = getProxyRuntimeStatus();
+
+     // Sort: disabled first, then cooldowns, then others
+@@ -1448,7 +1513,8 @@ export function registerSuperAdminCommands(bot: Bot): void {
+     if (cooling > 0) {
+       kb.text(`🧹 Cooldownlarni tozalash (${cooling})`, "sa_proxy_clear_cooldowns").row();
+     }
+-    kb.text(`⚙️ Limit: ${maxUses} ta`, "sa_proxy_limit").row();
++    kb.text(`⚙️ Proksi Limit: ${maxUses} ta`, "sa_proxy_limit").row();
++    kb.text(`⏱ Karta Limit Yangilanish: ${cardLimitDays} kun`, "sa_card_limit").row();
+     for (const r of shown) {
+       const full      = r.isActive && r.usedCount >= maxUses;
+       const onCooldown = cooldowns.has(r.id);
+@@ -1476,6 +1542,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
+     const uid = ctx.from.id;
+     awaitingIpInput.delete(uid);
+     awaitingLimitInput.delete(uid);
++    awaitingCardLimitInput.delete(uid);
+     awaitingIpDelete.delete(uid);
+     const { text, kb } = await buildProxyPanel();
+     try {
+diff --git a/artifacts/api-server/src/index.ts b/artifacts/api-server/src/index.ts
+index b4b2aa3..b017c3c 100644
+--- a/artifacts/api-server/src/index.ts
++++ b/artifacts/api-server/src/index.ts
+@@ -5,7 +5,10 @@ import { run, type RunnerHandle } from "@grammyjs/runner";
+
+ const __filename = fileURLToPath(import.meta.url);
+ const __dirname = path.dirname(__filename);
+-dotenv.config({ path: path.join(__dirname, "../.env") });
++// In dev, __dirname is `artifacts/api-server/src`, so `.env` is at `../../../.env`.
++// In prod, __dirname is `artifacts/api-server/dist`, so `.env` is at `../../../.env`.
++const envPath = path.resolve(__dirname, "../../../.env");
++dotenv.config({ path: envPath });
+ import app from "./app.js";
+ import { logger } from "./lib/logger.js";
+ import { createBot } from "./bot/bot.js";
+diff --git a/lib/db/src/schema/userbots.ts b/lib/db/src/schema/userbots.ts
+index 4ff1de5..fbe7ba7 100644
+--- a/lib/db/src/schema/userbots.ts
++++ b/lib/db/src/schema/userbots.ts
+@@ -124,6 +124,7 @@ export const cardUsages = pgTable("card_usages", {
+ export const proxySettings = pgTable("proxy_settings", {
+   id: integer("id").primaryKey().default(1), // always 1
+   maxUses: integer("max_uses").notNull().default(8),
++  cardLimitDays: integer("card_limit_days").notNull().default(3),
+   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+ });
+
+diff --git a/scripts/setup-gce.sh b/scripts/setup-gce.sh
+index b85ba24..1e84309 100755
+--- a/scripts/setup-gce.sh
++++ b/scripts/setup-gce.sh
+@@ -23,10 +23,10 @@ else
+     log "Node.js allaqachon o'rnatilgan."
+ fi
+
+-# Corepack va Pnpm o'rnatish
+-log "Pnpm o'rnatilmoqda..."
+-sudo corepack enable
+-sudo corepack prepare pnpm@latest --activate
++# Pnpm 9.x ni bevosita npm orqali o'rnatish (node:sqlite mosligi uchun)
++log "Global pnpm ni tozalash va pnpm@9 ni o'rnatish..."
++sudo npm uninstall -g pnpm || true
++sudo npm install -g pnpm@9
+
+ # PM2 o'rnatish (agar yo'q bo'lsa)
+ log "PM2 va uning logrotate moduli o'rnatilmoqda..."
+@@ -40,9 +40,6 @@ else
+     log "PM2 allaqachon o'rnatilgan."
+ fi
+
+-# Playwright uchun kerakli tizim paketlarini o'rnatish
+-log "Playwright uchun kerakli tizim paketlari o'rnatilmoqda..."
+-sudo npx -y playwright install-deps
+
+ log "Kodni o'rnatish jildiga o'tilmoqda..."
+ # Agar foydalanuvchi bu skriptni loyiha papkasidan tashqarida ishlatsa xato bo'lmasligi uchun:
+@@ -58,6 +55,8 @@ if [ ! -f .env ]; then
+     read -p "PORT (masalan, 3000): " PORT_VAL
+     read -p "BOT_TOKEN (Telegram bot tokeni): " BOT_TOKEN_VAL
+     read -p "SUPER_ADMIN_ID (Telegram admin id): " ADMIN_VAL
++    read -p "API_ID (Telegram my.telegram.org api id): " API_ID_VAL
++    read -p "API_HASH (Telegram my.telegram.org api hash): " API_HASH_VAL
+     read -p "DATABASE_URL (PostgreSQL yoki Supabase url): " DB_VAL
+
+     PORT_VAL=${PORT_VAL:-3000}
+@@ -66,6 +65,8 @@ if [ ! -f .env ]; then
+ PORT=$PORT_VAL
+ BOT_TOKEN=$BOT_TOKEN_VAL
+ SUPER_ADMIN_ID=$ADMIN_VAL
++API_ID=$API_ID_VAL
++API_HASH=$API_HASH_VAL
+ DATABASE_URL=$DB_VAL
+ EOF
+     log ".env fayli muvaffaqiyatli yaratildi."
+@@ -75,13 +76,20 @@ fi
+ log "Pnpm orqali modullar yuklanmoqda..."
+ pnpm install
+
++# Playwright o'rnatish
++log "Playwright va kerakli tizim paketlari o'rnatilmoqda..."
++npx -y playwright install chromium
++sudo npx -y playwright install-deps chromium
++
+ # Build qilish
+ log "Loyiha build qilinmoqda..."
++set -a; source .env; set +a
+ pnpm build
+
+ # Ma'lumotlar bazasi jadvallarini yangilash (Drizzle ORM)
+ log "Ma'lumotlar bazasiga jadvallar kiritilmoqda..."
+-if pnpm --filter "./lib/db" run push; then
++set -a; source .env; set +a
++if pnpm --filter "@workspace/db" run push; then
+     log "Jadvallar muvaffaqiyatli bazaga yuklandi."
+ else
+     log "\033[1;33mDIQQAT: Bazaga jadvallarni yuklashda qandaydir muammo yuzaga kelgan bo'lishi mumkin.\033[0m"
