@@ -5,8 +5,8 @@
  */
 import { Bot, InlineKeyboard } from "grammy";
 import { db } from "@workspace/db";
-import { savedCards } from "@workspace/db";
-import { eq, and, desc } from "drizzle-orm";
+import { savedCards, cardUsages, proxySettings } from "@workspace/db";
+import { eq, and, desc, gte } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { E, EID } from "../../lib/emoji.js";
 import { recordStat } from "../super-admin.js";
@@ -132,6 +132,10 @@ export function registerCardsHandlers(bot: Bot): void {
       return;
     }
 
+    const [proxyRow] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
+    const cardLimitDays = proxyRow?.cardLimitDays ?? 3;
+    const periodStart = new Date(Date.now() - cardLimitDays * 24 * 60 * 60 * 1000);
+
     const kb = new InlineKeyboard();
     for (const c of cards) {
       const last4  = c.cardNumber.slice(-4);
@@ -141,12 +145,18 @@ export function registerCardsHandlers(bot: Bot): void {
     kb.text("Karta qo'shish", "menu_addcard").icon(EID.ADD).success()
       .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 
+    const lines: string[] = [];
+    for (const c of cards) {
+      const usages = await db.select().from(cardUsages).where(
+        and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, userId), gte(cardUsages.usedAt, periodStart))
+      );
+      const used = usages.length;
+      const def = c.isDefault ? ` ${E.STAR} asosiy` : "";
+      lines.push(`• ****${c.cardNumber.slice(-4)} (${c.expiry}) — ${used}/5 (limit)${def}`);
+    }
+
     await reply(
-      `${E.CARD} <b>Saqlangan kartalar</b> (${cards.length} ta):\n\n` +
-        cards.map(c => {
-          const def = c.isDefault ? ` ${E.STAR} asosiy` : "";
-          return `• ****${c.cardNumber.slice(-4)} (${c.expiry})${def}`;
-        }).join("\n"),
+      `${E.CARD} <b>Saqlangan kartalar</b> (${cards.length} ta):\n\n` + lines.join("\n"),
       { parse_mode: "HTML", reply_markup: kb },
     );
   };

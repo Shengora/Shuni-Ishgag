@@ -23,10 +23,10 @@ else
     log "Node.js allaqachon o'rnatilgan."
 fi
 
-# Corepack va Pnpm o'rnatish
-log "Pnpm o'rnatilmoqda..."
-sudo corepack enable
-sudo corepack prepare pnpm@latest --activate
+# Pnpm 9.x ni bevosita npm orqali o'rnatish (node:sqlite mosligi uchun)
+log "Global pnpm ni tozalash va pnpm@9 ni o'rnatish..."
+sudo npm uninstall -g pnpm || true
+sudo npm install -g pnpm@9
 
 # PM2 o'rnatish (agar yo'q bo'lsa)
 log "PM2 va uning logrotate moduli o'rnatilmoqda..."
@@ -40,9 +40,6 @@ else
     log "PM2 allaqachon o'rnatilgan."
 fi
 
-# Playwright uchun kerakli tizim paketlarini o'rnatish
-log "Playwright uchun kerakli tizim paketlari o'rnatilmoqda..."
-sudo npx -y playwright install-deps
 
 log "Kodni o'rnatish jildiga o'tilmoqda..."
 # Agar foydalanuvchi bu skriptni loyiha papkasidan tashqarida ishlatsa xato bo'lmasligi uchun:
@@ -58,6 +55,8 @@ if [ ! -f .env ]; then
     read -p "PORT (masalan, 3000): " PORT_VAL
     read -p "BOT_TOKEN (Telegram bot tokeni): " BOT_TOKEN_VAL
     read -p "SUPER_ADMIN_ID (Telegram admin id): " ADMIN_VAL
+    read -p "API_ID (Telegram my.telegram.org api id): " API_ID_VAL
+    read -p "API_HASH (Telegram my.telegram.org api hash): " API_HASH_VAL
     read -p "DATABASE_URL (PostgreSQL yoki Supabase url): " DB_VAL
 
     PORT_VAL=${PORT_VAL:-3000}
@@ -66,6 +65,8 @@ if [ ! -f .env ]; then
 PORT=$PORT_VAL
 BOT_TOKEN=$BOT_TOKEN_VAL
 SUPER_ADMIN_ID=$ADMIN_VAL
+API_ID=$API_ID_VAL
+API_HASH=$API_HASH_VAL
 DATABASE_URL=$DB_VAL
 EOF
     log ".env fayli muvaffaqiyatli yaratildi."
@@ -75,13 +76,20 @@ fi
 log "Pnpm orqali modullar yuklanmoqda..."
 pnpm install
 
+# Playwright o'rnatish
+log "Playwright va kerakli tizim paketlari o'rnatilmoqda..."
+npx -y playwright install chromium
+sudo npx -y playwright install-deps chromium
+
 # Build qilish
 log "Loyiha build qilinmoqda..."
+set -a; source .env; set +a
 pnpm build
 
 # Ma'lumotlar bazasi jadvallarini yangilash (Drizzle ORM)
 log "Ma'lumotlar bazasiga jadvallar kiritilmoqda..."
-if pnpm --filter "./lib/db" run push; then
+set -a; source .env; set +a
+if pnpm --filter "@workspace/db" run push; then
     log "Jadvallar muvaffaqiyatli bazaga yuklandi."
 else
     log "\033[1;33mDIQQAT: Bazaga jadvallarni yuklashda qandaydir muammo yuzaga kelgan bo'lishi mumkin.\033[0m"

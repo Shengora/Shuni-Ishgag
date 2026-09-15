@@ -103,7 +103,7 @@ export function trackCrTs(id: string): void       { _crTs.set(id, Date.now()); }
 export function clearCrTs(id: string): void       { _crTs.delete(id); }
 
 const TTL_CLEANUP_INTERVAL_MS = 5 * 60_000;   // run every 5 min
-const STALE_THRESHOLD_MS      = 15 * 60_000;  // expire entries older than 15 min
+const STALE_THRESHOLD_MS      = 60 * 60_000;  // expire entries older than 1 hr
 
 /** Start the background TTL cleanup job. Call once on bot startup. */
 export function startCallbackMapCleanup(): void {
@@ -220,8 +220,8 @@ export function premiumPickerKeyboard(): InlineKeyboard {
     .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 }
 
-export function cardUsagePickerKeyboard(sessionCount: number, usedIn3Days: number, cardId: number, remainingToSelect: number): InlineKeyboard {
-  const remaining = Math.max(0, 5 - usedIn3Days);
+export function cardUsagePickerKeyboard(sessionCount: number, usedInPeriod: number, cardId: number, remainingToSelect: number): InlineKeyboard {
+  const remaining = Math.max(0, 5 - usedInPeriod);
   const kb = new InlineKeyboard();
   const maxOptions = Math.min(5, remainingToSelect);
 

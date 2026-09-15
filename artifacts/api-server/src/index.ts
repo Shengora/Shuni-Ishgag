@@ -5,7 +5,10 @@ import { run, type RunnerHandle } from "@grammyjs/runner";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.join(__dirname, "../.env") });
+// In dev, __dirname is `artifacts/api-server/src`, so `.env` is at `../../../.env`.
+// In prod, __dirname is `artifacts/api-server/dist`, so `.env` is at `../../../.env`.
+const envPath = path.resolve(__dirname, "../../../.env");
+dotenv.config({ path: envPath });
 import app from "./app.js";
 import { logger } from "./lib/logger.js";
 import { createBot } from "./bot/bot.js";

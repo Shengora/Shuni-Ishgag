@@ -124,6 +124,7 @@ export const cardUsages = pgTable("card_usages", {
 export const proxySettings = pgTable("proxy_settings", {
   id: integer("id").primaryKey().default(1), // always 1
   maxUses: integer("max_uses").notNull().default(8),
+  cardLimitDays: integer("card_limit_days").notNull().default(3),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

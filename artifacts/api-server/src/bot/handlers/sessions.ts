@@ -20,6 +20,7 @@ import {
   parseRepreamCodeMessage,
   signInWithCodeAndPass,
   verifyAndPurgeDeadSessions,
+  checkPremiumBotSpam,
 } from "../client.js";
 import { notifyError } from "../notify.js";
 import {
@@ -142,6 +143,7 @@ export function registerSessionHandlers(bot: Bot): void {
       kb.text(`❌ ${s.phone}`, `delsession:${s.phone}`).row();
     }
     kb.text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger().row();
+    kb.text("Startlarni tekshirish", "menu_check_spam").icon(EID.LOCK).danger().row();
     kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 
     await ctx.reply(
@@ -549,6 +551,7 @@ export function registerSessionHandlers(bot: Bot): void {
       kb.text(`❌ ${s.phone}`, `delsession:${s.phone}`).row();
     }
     kb.text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger().row();
+    kb.text("Startlarni tekshirish", "menu_check_spam").icon(EID.LOCK).danger().row();
     kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 
     await ctx.reply(
@@ -631,6 +634,7 @@ export function registerSessionHandlers(bot: Bot): void {
       kb.text(`❌ ${s.phone}`, `delsession:${s.phone}`).row();
     }
     kb.text("Yaroqsizlarni tozalash", "menu_cleanup_sessions").icon(EID.TRASH).danger().row();
+    kb.text("Startlarni tekshirish", "menu_check_spam").icon(EID.LOCK).danger().row();
     kb.text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 
     await ctx.editMessageText(
@@ -666,5 +670,124 @@ export function registerSessionHandlers(bot: Bot): void {
         reply_markup: menuButton(),
       })
       .catch(() => ctx.reply(summary, { parse_mode: "HTML", reply_markup: menuButton() }));
+  });
+
+  // ── menu_check_spam callback ───────────────────────────────────────────────
+  bot.callbackQuery("menu_check_spam", async (ctx) => {
+    await ctx.answerCallbackQuery().catch(() => {});
+    const ownerId = ctx.from.id;
+
+    const sessions = await db.select().from(userbotSessions)
+      .where(and(eq(userbotSessions.status, "active"), eq(userbotSessions.ownerId, ownerId)));
+
+    if (sessions.length === 0) {
+      await ctx.reply("❌ Faol sessiyalar topilmadi.", { reply_markup: menuButton() });
+      return;
+    }
+
+    const statusMsg = await ctx.reply("🔍 Spam startlar tekshirilmoqda...\n<i>Bu biroz vaqt olishi mumkin</i>", { parse_mode: "HTML" });
+
+    const spamPhones: string[] = [];
+    let checked = 0;
+    let lastEdit = Date.now();
+
+    for (const s of sessions) {
+      if (activePremiumSessions.has(s.phone)) {
+        checked++;
+        continue;
+      }
+      try {
+        const isSpam = await checkPremiumBotSpam(s.sessionString, PREMIUM_BOT);
+        if (isSpam) {
+          spamPhones.push(s.phone);
+        }
+      } catch (err) {
+        logger.warn({ phone: s.phone, err }, "checkPremiumBotSpam error");
+      }
+      checked++;
+
+      const now = Date.now();
+      if (now - lastEdit > 2000 && checked < sessions.length) {
+        lastEdit = now;
+        ctx.api.editMessageText(statusMsg.chat.id, statusMsg.message_id, `🔍 Tekshirilmoqda: ${checked}/${sessions.length}...`).catch(() => {});
+      }
+    }
+
+    if (spamPhones.length === 0) {
+      await ctx.api.editMessageText(statusMsg.chat.id, statusMsg.message_id, "✅ So'nggi 2 kun ichida ko'p /start bosilgan yaroqsiz sessiyalar topilmadi.", { reply_markup: menuButton() }).catch(() => {});
+      return;
+    }
+
+    // Temporary storage in a local map to avoid large callback data strings
+    const spamPhonesStr = spamPhones.join(",");
+    const kb = new InlineKeyboard()
+      .text("O'chirishni tasdiqlash", `confirm_del_spam:${spamPhones.length}`)
+      .row()
+      .text("Bekor qilish", "menu_list");
+
+    const stateId = Date.now().toString();
+    (global as any)[`spam_state_${stateId}`] = spamPhones;
+
+    const kb2 = new InlineKeyboard()
+      .text("✅ Ha, o'chirish va freeze qilish", `del_spam:${stateId}`).icon(EID.TRASH).danger()
+      .row()
+      .text("❌ Yo'q", "menu_list").icon(EID.NO).primary();
+
+    await ctx.api.editMessageText(
+      statusMsg.chat.id,
+      statusMsg.message_id,
+      `⚠️ <b>Spam Sessiyalar topildi!</b>\n\nQuyidagi <b>${spamPhones.length}</b> ta raqam oxirgi 2 kunda 2 tadan ko'p /start bosgan:\n\n${spamPhones.map(p => `• <code>${p}</code>`).join("\n")}\n\nUshbu sessiyalarni bazadan o'chirib yuboraymi (va manba botda ularni freeze qilaymi)?`,
+      { parse_mode: "HTML", reply_markup: kb2 }
+    ).catch(() => {});
+  });
+
+  bot.callbackQuery(/^del_spam:(.+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery().catch(() => {});
+    const stateId = ctx.match[1];
+    const spamPhones: string[] = (global as any)[`spam_state_${stateId}`];
+
+    if (!spamPhones || !Array.isArray(spamPhones)) {
+      await ctx.editMessageText("❌ So'rov eskirgan yoki xato. Iltimos qayta urinib ko'ring.", { reply_markup: menuButton() }).catch(() => {});
+      return;
+    }
+
+    const statusMsg = await ctx.reply("🧹 O'chirilmoqda va freeze qilinmoqda...");
+
+    let deleted = 0;
+    let frozen = 0;
+
+    for (const phone of spamPhones) {
+      // Find pendingNumbers row to freeze
+      const pendingRows = await db.select().from(pendingNumbers).where(eq(pendingNumbers.phone, phone)).limit(1);
+
+      // Delete session
+      await db.delete(userbotSessions).where(eq(userbotSessions.phone, phone));
+      deleted++;
+
+      if (pendingRows.length > 0) {
+        const row = pendingRows[0];
+        const masterClient = await getMasterClient(ctx.from.id);
+        const botName = row.providerBot || DEFAULT_REPREAM_BOT;
+
+        if (masterClient && row.repreamMessageId && row.freezeData) {
+          try {
+            await clickRepreamButton(masterClient, botName, Number(row.repreamMessageId), row.freezeData);
+            frozen++;
+          } catch (e) {
+            logger.warn({ e, phone }, "Failed to click freeze button during spam cleanup");
+          }
+        }
+        await db.update(pendingNumbers).set({ status: "frozen" }).where(eq(pendingNumbers.id, row.id));
+      }
+    }
+
+    delete (global as any)[`spam_state_${stateId}`];
+
+    await ctx.api.editMessageText(
+      statusMsg.chat.id,
+      statusMsg.message_id,
+      `✅ <b>Yakunlandi!</b>\n\n🗑 O'chirilgan sessiyalar: <b>${deleted}</b> ta\n🧊 Freeze qilingan raqamlar: <b>${frozen}</b> ta`,
+      { parse_mode: "HTML", reply_markup: menuButton() }
+    ).catch(() => {});
   });
 }
