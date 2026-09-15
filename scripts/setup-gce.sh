@@ -55,6 +55,8 @@ if [ ! -f .env ]; then
     read -p "PORT (masalan, 3000): " PORT_VAL
     read -p "BOT_TOKEN (Telegram bot tokeni): " BOT_TOKEN_VAL
     read -p "SUPER_ADMIN_ID (Telegram admin id): " ADMIN_VAL
+    read -p "API_ID (Telegram my.telegram.org api id): " API_ID_VAL
+    read -p "API_HASH (Telegram my.telegram.org api hash): " API_HASH_VAL
     read -p "DATABASE_URL (PostgreSQL yoki Supabase url): " DB_VAL
 
     PORT_VAL=${PORT_VAL:-3000}
@@ -63,6 +65,8 @@ if [ ! -f .env ]; then
 PORT=$PORT_VAL
 BOT_TOKEN=$BOT_TOKEN_VAL
 SUPER_ADMIN_ID=$ADMIN_VAL
+API_ID=$API_ID_VAL
+API_HASH=$API_HASH_VAL
 DATABASE_URL=$DB_VAL
 EOF
     log ".env fayli muvaffaqiyatli yaratildi."
