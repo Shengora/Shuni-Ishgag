@@ -23,10 +23,10 @@ else
     log "Node.js allaqachon o'rnatilgan."
 fi
 
-# Corepack va Pnpm o'rnatish
-log "Pnpm o'rnatilmoqda..."
-sudo corepack enable
-sudo corepack prepare pnpm@latest --activate
+# Pnpm 9.x ni bevosita npm orqali o'rnatish (node:sqlite mosligi uchun)
+log "Global pnpm ni tozalash va pnpm@9 ni o'rnatish..."
+sudo npm uninstall -g pnpm || true
+sudo npm install -g pnpm@9
 
 # PM2 o'rnatish (agar yo'q bo'lsa)
 log "PM2 va uning logrotate moduli o'rnatilmoqda..."
@@ -40,9 +40,6 @@ else
     log "PM2 allaqachon o'rnatilgan."
 fi
 
-# Playwright uchun kerakli tizim paketlarini o'rnatish
-log "Playwright uchun kerakli tizim paketlari o'rnatilmoqda..."
-sudo npx -y playwright install-deps
 
 log "Kodni o'rnatish jildiga o'tilmoqda..."
 # Agar foydalanuvchi bu skriptni loyiha papkasidan tashqarida ishlatsa xato bo'lmasligi uchun:
@@ -75,8 +72,14 @@ fi
 log "Pnpm orqali modullar yuklanmoqda..."
 pnpm install
 
+# Playwright o'rnatish
+log "Playwright va kerakli tizim paketlari o'rnatilmoqda..."
+npx -y playwright install chromium
+sudo npx -y playwright install-deps chromium
+
 # Build qilish
 log "Loyiha build qilinmoqda..."
+set -a; source .env; set +a
 pnpm build
 
 # Ma'lumotlar bazasi jadvallarini yangilash (Drizzle ORM)
