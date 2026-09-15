@@ -12,6 +12,7 @@ import { eq, and, desc, gte } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { E, EID } from "../../lib/emoji.js";
 import { recordStat } from "../super-admin.js";
+import { proxySettings } from "@workspace/db";
 import {
   getMasterClient,
   createClientFromSession,
@@ -416,13 +417,16 @@ export function registerPremiumHandlers(bot: Bot): void {
       selectedCount = selectedSoFar;
     }
 
-    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const [proxyRow] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
+    const cardLimitDays = proxyRow?.cardLimitDays ?? 3;
+    const periodStart = new Date(Date.now() - cardLimitDays * 24 * 60 * 60 * 1000);
+
     const kb = new InlineKeyboard();
     const lines: string[] = [];
 
     for (const c of cards) {
       const usages = await db.select().from(cardUsages).where(
-        and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgo)),
+        and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, periodStart)),
       );
       // Also consider uses already requested in current pending state
       let pendingUses = 0;
@@ -509,29 +513,32 @@ export function registerPremiumHandlers(bot: Bot): void {
     const selectedSoFar = state.selections.reduce((acc, sel) => acc + sel.uses, 0);
     const remainingToSelect = total - selectedSoFar;
 
-    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const [proxyRow] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
+    const cardLimitDays = proxyRow?.cardLimitDays ?? 3;
+    const periodStart = new Date(Date.now() - cardLimitDays * 24 * 60 * 60 * 1000);
+
     const usages = await db.select().from(cardUsages).where(
-      and(eq(cardUsages.cardNumber, cardRow.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgo)),
+      and(eq(cardUsages.cardNumber, cardRow.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, periodStart)),
     );
 
     const pendingUses = state.selections.filter((s) => s.cardId === cardId).reduce((acc, s) => acc + s.uses, 0);
-    const usedIn3Days = usages.length + pendingUses;
-    const remaining = Math.max(0, 5 - usedIn3Days);
+    const usedInPeriod = usages.length + pendingUses;
+    const remaining = Math.max(0, 5 - usedInPeriod);
     const label = cardRow.bankName ?? cardRow.cardHolder;
 
     await ctx.answerCallbackQuery().catch(() => {});
 
     if (remaining === 0) {
       await ctx.reply(
-        `⛔ <b>Karta limiti tugagan</b>\n\n💳 <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi 3 kunda allaqachon <b>5 marta</b> ishlatilgan (yoki navbatga qo'yilgan).\n\n🕐 Limit yangilanishi uchun kuting yoki boshqa karta tanlang.`,
+        `⛔ <b>Karta limiti tugagan</b>\n\n💳 <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi ${cardLimitDays} kunda allaqachon <b>5 marta</b> ishlatilgan (yoki navbatga qo'yilgan).\n\n🕐 Limit yangilanishi uchun kuting yoki boshqa karta tanlang.`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("◀️ Kartalar", `batch_premium_next`).text("🏠 Bosh menyu", "menu_home") },
       );
       return;
     }
 
     await ctx.reply(
-      `💳 <b>Nechta obuna olish kerak?</b>\n\nKarta: <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi 3 kunda: <b>${usedIn3Days}/5</b> marta ishlatilgan (kutilyotgan bilan)\nQolgan: <b>${remaining} ta</b>\n\n<i>Bu karta bilan yana nechta raqamga Premium olish kerak?</i>\nJami tanlanishi kerak bo'lganlar: <b>${remainingToSelect}</b> ta.`,
-      { parse_mode: "HTML", reply_markup: cardUsagePickerKeyboard(total, usedIn3Days, cardId, remainingToSelect) },
+      `💳 <b>Nechta obuna olish kerak?</b>\n\nKarta: <b>${label}</b> <code>${cardRow.cardNumberMasked}</code>\nSo'nggi ${cardLimitDays} kunda: <b>${usedInPeriod}/5</b> marta ishlatilgan (kutilyotgan bilan)\nQolgan: <b>${remaining} ta</b>\n\n<i>Bu karta bilan yana nechta raqamga Premium olish kerak?</i>\nJami tanlanishi kerak bo'lganlar: <b>${remainingToSelect}</b> ta.`,
+      { parse_mode: "HTML", reply_markup: cardUsagePickerKeyboard(total, usedInPeriod, cardId, remainingToSelect) },
     );
   });
 
@@ -875,14 +882,16 @@ export function registerPremiumHandlers(bot: Bot): void {
 
                 // Offer another card after exhausted same-card retries
                 if (result.paymentDeclined && cardRetryCount < MAX_CARD_RETRIES) {
-                  const threeDaysAgoRetry = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+                  const [proxyRow] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
+                  const cardLimitDays = proxyRow?.cardLimitDays ?? 3;
+                  const periodStartRetry = new Date(Date.now() - cardLimitDays * 24 * 60 * 60 * 1000);
                   const otherCards = await db.select().from(savedCards).where(eq(savedCards.userId, operatorId)).orderBy(desc(savedCards.createdAt));
 
                   const usable: typeof otherCards = [];
                   for (const c of otherCards) {
                     if (c.id === activeCardId) continue;
                     const cu = await db.select().from(cardUsages).where(
-                      and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, threeDaysAgoRetry)),
+                      and(eq(cardUsages.cardNumber, c.cardNumber), eq(cardUsages.operatorId, operatorId), gte(cardUsages.usedAt, periodStartRetry)),
                     );
                     if (cu.length < 5) usable.push(c);
                   }

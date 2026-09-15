@@ -220,8 +220,8 @@ export function premiumPickerKeyboard(): InlineKeyboard {
     .text("Bosh menyu", "menu_home").icon(EID.HOME).primary();
 }
 
-export function cardUsagePickerKeyboard(sessionCount: number, usedIn3Days: number, cardId: number, remainingToSelect: number): InlineKeyboard {
-  const remaining = Math.max(0, 5 - usedIn3Days);
+export function cardUsagePickerKeyboard(sessionCount: number, usedInPeriod: number, cardId: number, remainingToSelect: number): InlineKeyboard {
+  const remaining = Math.max(0, 5 - usedInPeriod);
   const kb = new InlineKeyboard();
   const maxOptions = Math.min(5, remainingToSelect);
 

@@ -524,6 +524,7 @@ const awaitingBroadcastInput = new Set<number>();
 const awaitingSAInput    = new Map<number, number>(); // superAdminId → promptMsgId (add super admin)
 const awaitingIpInput    = new Map<number, number>(); // superAdminId → promptMsgId
 const awaitingLimitInput = new Map<number, number>(); // superAdminId → promptMsgId
+const awaitingCardLimitInput = new Map<number, number>(); // superAdminId → promptMsgId
 const awaitingIpDelete   = new Map<number, number>(); // superAdminId → promptMsgId (delete proxy by IP)
 
 // ── Register function ─────────────────────────────────────────────────────────
@@ -1038,7 +1039,8 @@ export function registerSuperAdminCommands(bot: Bot): void {
   // ── sa_proxy_limit — show current limit + prompt to change ──────────────────
   bot.callbackQuery("sa_proxy_limit", requireSA, async (ctx) => {
     await ctx.answerCallbackQuery();
-    const maxUses = await getMaxUses();
+    const settings = await getProxySettings();
+    const maxUses = settings.maxUses;
     const msg = await ctx.reply(
       `⚙️ <b>Har IP uchun limit</b>\n\n` +
       `Hozirgi qiymat: <b>${maxUses} ta</b>\n\n` +
@@ -1049,6 +1051,20 @@ export function registerSuperAdminCommands(bot: Bot): void {
       },
     );
     awaitingLimitInput.set(ctx.from.id, msg.message_id);
+  });
+
+  // ── sa_card_limit — prompt for cardLimitDays ─────────────────────────────
+  bot.callbackQuery("sa_card_limit", requireSA, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const settings = await getProxySettings();
+    const msg = await ctx.reply(
+      `⏱ <b>Karta Limiti Yangilanish Muddati</b>\n\nKarta 5 marta ishlatilgandan so'ng, necha kun ichida limit yana 0 ga tushishini belgilang.\nHozirgi qiymat: <b>${settings.cardLimitDays} kun</b>\n\n<i>Yangi muddatni yozib yuboring (masalan: <code>3</code>)</i>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("❌ Bekor", "sa_proxy"),
+      },
+    );
+    awaitingCardLimitInput.set(ctx.from.id, msg.message_id);
   });
 
   // ── Unified text handler — admin ID add OR proxy IP add OR limit set ──────────
@@ -1063,6 +1079,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       awaitingAdminInput.delete(uid);
       awaitingIpInput.delete(uid);
       awaitingLimitInput.delete(uid);
+      awaitingCardLimitInput.delete(uid);
       awaitingSAInput.delete(uid);
 
       const targetIp = ctx.message.text.trim();
@@ -1097,6 +1114,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       // Cancel any stale flows so there's no leftover state
       awaitingAdminInput.delete(uid);
       awaitingLimitInput.delete(uid);
+      awaitingCardLimitInput.delete(uid);
       awaitingSAInput.delete(uid);
       awaitingIpDelete.delete(uid);
 
@@ -1178,6 +1196,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       awaitingLimitInput.delete(uid);
       awaitingAdminInput.delete(uid);
       awaitingIpInput.delete(uid);
+      awaitingCardLimitInput.delete(uid);
       awaitingSAInput.delete(uid);
       awaitingIpDelete.delete(uid);
 
@@ -1206,6 +1225,41 @@ export function registerSuperAdminCommands(bot: Bot): void {
       return;
     }
 
+    // ── Branch B2: awaiting card limit input ──────────────────────────────────
+    if (awaitingCardLimitInput.has(uid)) {
+      const promptMsgId = awaitingCardLimitInput.get(uid)!;
+      awaitingCardLimitInput.delete(uid);
+      awaitingAdminInput.delete(uid);
+      awaitingIpInput.delete(uid);
+      awaitingLimitInput.delete(uid);
+      awaitingSAInput.delete(uid);
+      awaitingIpDelete.delete(uid);
+
+      const val = parseInt(ctx.message.text.trim(), 10);
+      if (isNaN(val) || val < 1 || val > 365) {
+        await ctx.reply(
+          `❌ Noto'g'ri qiymat. 1 dan 365 gacha raqam kiriting.`,
+          { parse_mode: "HTML" },
+        );
+        return;
+      }
+      try {
+        await ctx.api.deleteMessage(ctx.chat.id, promptMsgId).catch(() => {});
+        await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
+        await db
+          .insert(proxySettings)
+          .values({ id: 1, cardLimitDays: val })
+          .onConflictDoUpdate({ target: proxySettings.id, set: { cardLimitDays: val, updatedAt: new Date() } });
+        const { text, kb } = await buildProxyPanel();
+        await ctx.reply(`✅ Karta limiti muddati <b>${val} kun</b> ga o'zgartirildi!\n\n` + text, { parse_mode: "HTML", reply_markup: kb });
+      } catch (err: any) {
+        logger.error({ err }, "sa card limit set error");
+        await notifyError(err, "sa card limit set error");
+        await ctx.reply(`❌ Xato: ${err.message}`);
+      }
+      return; // consumed
+    }
+
     // ── Branch D: awaiting super admin ID input ───────────────────────────────
     if (awaitingSAInput.has(uid)) {
       const promptMsgId = awaitingSAInput.get(uid)!;
@@ -1213,6 +1267,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       awaitingAdminInput.delete(uid);
       awaitingIpInput.delete(uid);
       awaitingLimitInput.delete(uid);
+      awaitingCardLimitInput.delete(uid);
       awaitingIpDelete.delete(uid);
 
       const targetId = Number(ctx.message.text.trim());
@@ -1347,18 +1402,28 @@ export function registerSuperAdminCommands(bot: Bot): void {
   // ── 🌐 PROKSI IP BOSHQARUV ────────────────────────────────────────────────
   // ══════════════════════════════════════════════════════════════════════════
 
-  // Helper: read global maxUses from DB
-  async function getMaxUses(): Promise<number> {
+  // Helper: read global proxySettings from DB
+  async function getProxySettings() {
     const [row] = await db.select().from(proxySettings).where(eq(proxySettings.id, 1)).limit(1);
-    return row?.maxUses ?? 8;
+    return {
+      maxUses: row?.maxUses ?? 8,
+      cardLimitDays: row?.cardLimitDays ?? 3,
+    };
+  }
+
+  // Keep getMaxUses for existing callers if necessary or replace
+  async function getMaxUses(): Promise<number> {
+    const { maxUses } = await getProxySettings();
+    return maxUses;
   }
 
   // Helper: build proxy overview text + keyboard
   async function buildProxyPanel() {
-    const [rawRows, maxUses] = await Promise.all([
+    const [rawRows, settings] = await Promise.all([
       db.select().from(proxyIps).orderBy(asc(proxyIps.usedCount)),
-      getMaxUses(),
+      getProxySettings(),
     ]);
+    const { maxUses, cardLimitDays } = settings;
     const { inFlight, cooldowns } = getProxyRuntimeStatus();
 
     // Sort: disabled first, then cooldowns, then others
@@ -1448,7 +1513,8 @@ export function registerSuperAdminCommands(bot: Bot): void {
     if (cooling > 0) {
       kb.text(`🧹 Cooldownlarni tozalash (${cooling})`, "sa_proxy_clear_cooldowns").row();
     }
-    kb.text(`⚙️ Limit: ${maxUses} ta`, "sa_proxy_limit").row();
+    kb.text(`⚙️ Proksi Limit: ${maxUses} ta`, "sa_proxy_limit").row();
+    kb.text(`⏱ Karta Limit Yangilanish: ${cardLimitDays} kun`, "sa_card_limit").row();
     for (const r of shown) {
       const full      = r.isActive && r.usedCount >= maxUses;
       const onCooldown = cooldowns.has(r.id);
@@ -1476,6 +1542,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
     const uid = ctx.from.id;
     awaitingIpInput.delete(uid);
     awaitingLimitInput.delete(uid);
+    awaitingCardLimitInput.delete(uid);
     awaitingIpDelete.delete(uid);
     const { text, kb } = await buildProxyPanel();
     try {

@@ -193,6 +193,32 @@ export function startUserbotSessionCleanup(): void {
  * Sessions that error for any other reason (timeout, flood wait, proxy issue)
  * are left untouched — only a confirmed invalid-session signature counts as dead.
  */
+export async function checkPremiumBotSpam(sessionString: string, premiumBotUsername: string): Promise<boolean> {
+  const client = await createClientFromSession(sessionString);
+  try {
+    const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    const msgs = await client.getMessages(premiumBotUsername, { limit: 100 });
+    let startCount = 0;
+
+    for (const msg of msgs) {
+      if (msg.date * 1000 < twoDaysAgo) break;
+      if (msg.out && msg.message?.trim().startsWith("/start")) {
+        startCount++;
+      }
+    }
+    return startCount > 2;
+  } catch (err: any) {
+    if (err.message?.includes("CHANNEL_PRIVATE") || err.message?.includes("USERNAME_NOT_OCCUPIED")) {
+      return false; // Not interacted or bot deleted
+    }
+    throw err;
+  } finally {
+    try {
+      await client.disconnect();
+    } catch (_) {}
+  }
+}
+
 export async function verifyAndPurgeDeadSessions(
   onProgress?: (checked: number, total: number, phone: string) => void,
   skipPhones?: Set<string>,
