@@ -5,10 +5,9 @@ import { run, type RunnerHandle } from "@grammyjs/runner";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// In dev, __dirname is `src/`, so `.env` is at `../../.env` relative to src, or `../.env` relative to `artifacts/api-server`.
-// In prod (dist/index.mjs), __dirname is `dist/`, so `.env` is at `../../.env`.
-// It's safer to find the project root dynamically or rely on the `setup-gce.sh` exported envs.
-const envPath = path.resolve(__dirname, process.env.NODE_ENV === "production" ? "../../.env" : "../../.env");
+// In dev, __dirname is `artifacts/api-server/src`, so `.env` is at `../../../.env`.
+// In prod, __dirname is `artifacts/api-server/dist`, so `.env` is at `../../../.env`.
+const envPath = path.resolve(__dirname, "../../../.env");
 dotenv.config({ path: envPath });
 import app from "./app.js";
 import { logger } from "./lib/logger.js";
