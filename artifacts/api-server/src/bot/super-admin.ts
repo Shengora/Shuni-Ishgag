@@ -17,13 +17,30 @@ import { getProxyRuntimeStatus, clearAllProxyCooldowns, normaliseProxyServer } f
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+const adminCache = new Map<number, { isAdmin: boolean; expires: number }>();
+const ADMIN_CACHE_TTL_MS = 60 * 1000; // 1 minute
+
 export async function isActiveAdmin(userId: number): Promise<boolean> {
+  const now = Date.now();
+  const cached = adminCache.get(userId);
+  if (cached && cached.expires > now) {
+    return cached.isAdmin;
+  }
+
   const [row] = await db
     .select()
     .from(admins)
     .where(and(eq(admins.telegramUserId, userId), eq(admins.isBlocked, false)))
     .limit(1);
-  return !!row;
+  const isAdmin = !!row;
+
+  adminCache.set(userId, { isAdmin, expires: now + ADMIN_CACHE_TTL_MS });
+  return isAdmin;
+}
+
+// Function to clear admin cache for a user, useful when access changes
+export function invalidateAdminCache(userId: number) {
+  adminCache.delete(userId);
 }
 
 export function isSuperAdmin(userId: number): boolean {
@@ -32,15 +49,32 @@ export function isSuperAdmin(userId: number): boolean {
   return !!superAdminId && userId === superAdminId;
 }
 
+const superAdminCache = new Map<number, { isSA: boolean; expires: number }>();
+const SA_CACHE_TTL_MS = 60 * 1000; // 1 minute
+
 /** Returns true if userId is root super admin (env) OR has isSuperAdmin=true in DB. */
 export async function isAnySuperAdmin(userId: number): Promise<boolean> {
   if (isSuperAdmin(userId)) return true;
+
+  const now = Date.now();
+  const cached = superAdminCache.get(userId);
+  if (cached && cached.expires > now) {
+    return cached.isSA;
+  }
+
   const [row] = await db
     .select({ id: admins.id })
     .from(admins)
     .where(and(eq(admins.telegramUserId, userId), eq(admins.isSuperAdmin, true), eq(admins.isBlocked, false)))
     .limit(1);
-  return !!row;
+  const isSA = !!row;
+
+  superAdminCache.set(userId, { isSA, expires: now + SA_CACHE_TTL_MS });
+  return isSA;
+}
+
+export function invalidateSuperAdminCache(userId: number) {
+  superAdminCache.delete(userId);
 }
 
 export async function ensureSuperAdminSeeded(): Promise<void> {
@@ -725,6 +759,8 @@ export function registerSuperAdminCommands(bot: Bot): void {
       .update(admins)
       .set({ isSuperAdmin: false })
       .where(eq(admins.telegramUserId, targetId));
+    invalidateAdminCache(targetId);
+    invalidateSuperAdminCache(targetId);
     await ctx.answerCallbackQuery("✅ Darajasi tushirildi");
     await ctx.editMessageText(
       `✅ <code>${targetId}</code> endi oddiy admin.\nU botdan foydalana oladi, lekin super admin paneliga kirish huquqi yo'q.`,
@@ -753,6 +789,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
     const targetId = Number(ctx.match[1]);
     if (!(await assertNotSuperAdmin(ctx, targetId))) return;
     await db.update(admins).set({ isBlocked: true, blockedAt: new Date() }).where(eq(admins.telegramUserId, targetId));
+    invalidateAdminCache(targetId);
     await ctx.answerCallbackQuery("🚫 Bloklandi");
     const [row] = await db.select().from(admins).where(eq(admins.telegramUserId, targetId)).limit(1);
     if (!row) return;
@@ -774,6 +811,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
     const targetId = Number(ctx.match[1]);
     if (!(await assertNotSuperAdmin(ctx, targetId))) return;
     await db.update(admins).set({ isBlocked: false, blockedAt: null }).where(eq(admins.telegramUserId, targetId));
+    invalidateAdminCache(targetId);
     await ctx.answerCallbackQuery("✅ Blokdan chiqarildi");
     const [row] = await db.select().from(admins).where(eq(admins.telegramUserId, targetId)).limit(1);
     if (!row) return;
@@ -808,6 +846,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
     const targetId = Number(ctx.match[1]);
     if (!(await assertNotSuperAdmin(ctx, targetId))) return;
     await db.delete(admins).where(eq(admins.telegramUserId, targetId));
+    invalidateAdminCache(targetId);
     await ctx.answerCallbackQuery("🗑 O'chirildi");
     await ctx.editMessageText(
       `✅ Admin <code>${targetId}</code> o'chirildi.`,
@@ -1312,6 +1351,8 @@ export function registerSuperAdminCommands(bot: Bot): void {
             .update(admins)
             .set({ isSuperAdmin: true, isBlocked: false, blockedAt: null })
             .where(eq(admins.telegramUserId, targetId));
+          invalidateAdminCache(targetId);
+          invalidateSuperAdminCache(targetId);
           await ctx.reply(
             `✅ <b>Super Admin darajasi berildi!</b>\n\n` +
               `🆔 <code>${targetId}</code> endi super admin.\n` +
@@ -1326,6 +1367,8 @@ export function registerSuperAdminCommands(bot: Bot): void {
             isBlocked: false,
             addedBySuperAdminId: uid,
           });
+          invalidateAdminCache(targetId);
+          invalidateSuperAdminCache(targetId);
           await ctx.reply(
             `✅ <b>Yangi Super Admin qo'shildi!</b>\n\n` +
               `🆔 <code>${targetId}</code> endi super admin sifatida botdan foydalana oladi.\n` +
@@ -1366,6 +1409,7 @@ export function registerSuperAdminCommands(bot: Bot): void {
       if (existing) {
         if (existing.isBlocked) {
           await db.update(admins).set({ isBlocked: false, blockedAt: null }).where(eq(admins.telegramUserId, targetId));
+          invalidateAdminCache(targetId);
           await ctx.reply(
             `✅ Admin <code>${targetId}</code> allaqachon mavjud edi, blokdan chiqarildi.`,
             { parse_mode: "HTML", reply_markup: saMainMenu() },
