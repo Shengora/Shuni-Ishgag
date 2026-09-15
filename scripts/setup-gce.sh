@@ -23,10 +23,10 @@ else
     log "Node.js allaqachon o'rnatilgan."
 fi
 
-# Corepack va Pnpm o'rnatish
+# Pnpm o'rnatish
 log "Pnpm o'rnatilmoqda..."
-sudo corepack enable
-sudo corepack prepare pnpm@latest --activate
+sudo npm uninstall -g pnpm 2>/dev/null || true
+sudo npm install -g pnpm@9
 
 # PM2 o'rnatish (agar yo'q bo'lsa)
 log "PM2 va uning logrotate moduli o'rnatilmoqda..."
@@ -40,10 +40,6 @@ else
     log "PM2 allaqachon o'rnatilgan."
 fi
 
-# Playwright uchun kerakli tizim paketlarini o'rnatish
-log "Playwright uchun kerakli tizim paketlari o'rnatilmoqda..."
-sudo npx -y playwright install-deps
-
 log "Kodni o'rnatish jildiga o'tilmoqda..."
 # Agar foydalanuvchi bu skriptni loyiha papkasidan tashqarida ishlatsa xato bo'lmasligi uchun:
 cd "$(dirname "$0")/.."
@@ -56,24 +52,41 @@ if [ ! -f .env ]; then
     echo "Iltimos, .env faylini yaratish uchun quyidagi ma'lumotlarni kiriting."
 
     read -p "PORT (masalan, 3000): " PORT_VAL
+    read -p "BASE_PATH (masalan, /): " BASE_PATH_VAL
     read -p "BOT_TOKEN (Telegram bot tokeni): " BOT_TOKEN_VAL
     read -p "SUPER_ADMIN_ID (Telegram admin id): " ADMIN_VAL
-    read -p "DATABASE_URL (PostgreSQL yoki Supabase url): " DB_VAL
+    read -p "DATABASE_URL (PostgreSQL/Supabase IPv4 url): " DB_VAL
+    read -p "API_ID (Telegram API ID): " API_ID_VAL
+    read -p "API_HASH (Telegram API HASH): " API_HASH_VAL
 
     PORT_VAL=${PORT_VAL:-3000}
+    BASE_PATH_VAL=${BASE_PATH_VAL:-/}
 
     cat <<EOF > .env
 PORT=$PORT_VAL
+BASE_PATH=$BASE_PATH_VAL
 BOT_TOKEN=$BOT_TOKEN_VAL
 SUPER_ADMIN_ID=$ADMIN_VAL
 DATABASE_URL=$DB_VAL
+API_ID=$API_ID_VAL
+API_HASH=$API_HASH_VAL
 EOF
     log ".env fayli muvaffaqiyatli yaratildi."
 fi
 
+# Env o'zgaruvchilarini shell'ga export qilish (build uchun zarur)
+set -a
+source .env
+set +a
+
 # Loyiha modullarini yuklash
 log "Pnpm orqali modullar yuklanmoqda..."
 pnpm install
+
+# Playwright brauzerini va kerakli tizim paketlarini o'rnatish
+log "Playwright va kerakli tizim paketlari o'rnatilmoqda..."
+npx -y playwright install chromium
+sudo npx -y playwright install-deps chromium
 
 # Build qilish
 log "Loyiha build qilinmoqda..."
