@@ -84,7 +84,8 @@ pnpm build
 
 # Ma'lumotlar bazasi jadvallarini yangilash (Drizzle ORM)
 log "Ma'lumotlar bazasiga jadvallar kiritilmoqda..."
-if pnpm --filter "./lib/db" run push; then
+set -a; source .env; set +a
+if pnpm --filter "@workspace/db" run push; then
     log "Jadvallar muvaffaqiyatli bazaga yuklandi."
 else
     log "\033[1;33mDIQQAT: Bazaga jadvallarni yuklashda qandaydir muammo yuzaga kelgan bo'lishi mumkin.\033[0m"
