@@ -46,7 +46,7 @@ function enqueueSendCommand<T>(client: TelegramClient, fn: () => Promise<T>): Pr
 // Pending (not-yet-authorized) login clients, keyed by "${operatorId}:${slot}"
 // so a super admin can run up to 3 parallel login flows simultaneously.
 const _pendingClients = new Map<string, { client: TelegramClient; createdAt: number }>();
-const PENDING_CLIENT_TTL_MS = 15 * 60 * 1000; // abandoned login attempts expire after 15 min
+const PENDING_CLIENT_TTL_MS = 60 * 60 * 1000; // abandoned login attempts expire after 1 hr
 
 /** Returns the pending-client map key for a given operator + slot. */
 function pKey(operatorId: number, slot: number): string { return `${operatorId}:${slot}`; }
@@ -140,8 +140,8 @@ export async function markUserbotSessionInvalid(phone: string, reason: string): 
   }
 }
 
-const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
-const INVALID_SESSION_GRACE_MS = 24 * 60 * 60 * 1000; // keep invalid rows visible for 24h before purging
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // every 1 hours
+const INVALID_SESSION_GRACE_MS = 60 * 60 * 1000; // keep invalid rows visible for 1h before purging
 
 let _cleanupTimer: ReturnType<typeof setInterval> | null = null;
 

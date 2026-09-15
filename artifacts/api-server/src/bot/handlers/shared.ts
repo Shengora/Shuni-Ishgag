@@ -103,7 +103,7 @@ export function trackCrTs(id: string): void       { _crTs.set(id, Date.now()); }
 export function clearCrTs(id: string): void       { _crTs.delete(id); }
 
 const TTL_CLEANUP_INTERVAL_MS = 5 * 60_000;   // run every 5 min
-const STALE_THRESHOLD_MS      = 15 * 60_000;  // expire entries older than 15 min
+const STALE_THRESHOLD_MS      = 60 * 60_000;  // expire entries older than 1 hr
 
 /** Start the background TTL cleanup job. Call once on bot startup. */
 export function startCallbackMapCleanup(): void {
