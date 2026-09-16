@@ -43,31 +43,9 @@ import { registerBatchHandlers } from "./handlers/batch.js";
 import { registerPremiumHandlers } from "./handlers/premium.js";
 import { registerVerifierHandlers } from "./handlers/verifiers.js";
 
-// In development we must NOT poll with the same token as production — both
-// processes would compete for Telegram's single getUpdates consumer per
-// token, and since each process keeps its own in-memory flow state (pending
-// login/OTP/step6 callbacks) and its own database, a real user's multi-step
-// flow (login code entry, OTP, batch premium) can randomly get split across
-// the two processes and break. DEV_BOT_TOKEN (a separate @BotFather bot used
-// only for local testing) keeps dev traffic completely isolated from prod.
-function resolveBotToken(): string {
-  const isDev = process.env.NODE_ENV !== "production";
-  if (isDev) {
-    const devToken = process.env.DEV_BOT_TOKEN;
-    if (devToken) return devToken;
-    logger.warn(
-      "DEV_BOT_TOKEN not set — falling back to BOT_TOKEN in development. " +
-        "This means dev and production will poll the same bot and can interfere " +
-        "with real user flows. Set DEV_BOT_TOKEN to a separate @BotFather bot.",
-    );
-  }
-  const token = process.env.BOT_TOKEN;
-  if (!token) throw new Error("BOT_TOKEN env var is required");
-  return token;
-}
-
 export function createBot() {
-  const BOT_TOKEN = resolveBotToken();
+  const BOT_TOKEN = process.env.BOT_TOKEN;
+  if (!BOT_TOKEN) throw new Error("BOT_TOKEN env var is required");
 
   // Seed super admin on startup
   ensureSuperAdminSeeded().catch((err) =>
@@ -140,6 +118,9 @@ export function createBot() {
   // ── Operator-only middleware ───────────────────────────────────────────────
   // All commands/callbacks below this line require operator access.
   // Login commands are SA-only and guarded in their own handlers.
+  const profileUpdateCache = new Map<number, number>();
+  const PROFILE_UPDATE_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+
   bot.use(async (ctx, next) => {
     const userId = ctx.from?.id;
     if (!userId || !(await isOperator(userId))) {
@@ -147,12 +128,18 @@ export function createBot() {
       else if (ctx.message) await ctx.reply("❌ Bu bot faqat operatorlar uchun.");
       return;
     }
-    // Keep firstName/username fresh — fire-and-forget, never blocks the handler
+    // Keep firstName/username fresh — throttle database updates to avoid high DB load
     const from = ctx.from!;
-    db.update(admins)
-      .set({ username: from.username ?? null, firstName: from.first_name ?? null })
-      .where(eq(admins.telegramUserId, userId))
-      .catch(() => {});
+    const now = Date.now();
+    const lastUpdate = profileUpdateCache.get(userId) || 0;
+
+    if (now - lastUpdate > PROFILE_UPDATE_INTERVAL_MS) {
+      profileUpdateCache.set(userId, now);
+      db.update(admins)
+        .set({ username: from.username ?? null, firstName: from.first_name ?? null })
+        .where(eq(admins.telegramUserId, userId))
+        .catch(() => {});
+    }
     return next();
   });
 
