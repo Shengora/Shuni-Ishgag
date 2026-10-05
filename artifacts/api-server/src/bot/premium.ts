@@ -2463,6 +2463,73 @@ export class FlowStep6TimeoutError extends Error {
  * `onVerificationNeeded(url)` is called. The caller should show the URL to the
  * admin and wait until they complete 3DS, then resolve the returned promise.
  */
+
+/**
+ * Opens the 3DS verification URL in a headless browser and uses handle3dsOtpIfNeeded
+ * to capture the OTP from the operator and submit it.
+ */
+async function complete3dsVerificationWithPlaywright(
+  verificationUrl: string,
+  askOtp: () => Promise<string | null>,
+  debugLabel: string = "3ds-verify",
+  proxyConfig?: any
+): Promise<boolean> {
+  let browser: any = null;
+  let page: any = null;
+
+  try {
+    const pw = await import("playwright");
+
+    // Launch chromium
+    const systemChromiumPath = getSystemChromiumPath();
+    const replitChromiumPath = process.env.REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE;
+    const useReplitChromium =
+      !systemChromiumPath && !!replitChromiumPath && existsSync(replitChromiumPath);
+    const executablePath = systemChromiumPath ?? (useReplitChromium ? replitChromiumPath : undefined);
+
+    const launchOpts = {
+      headless: true,
+      ...(executablePath ? { executablePath } : {}),
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+      ...(proxyConfig ? {
+        proxy: {
+          server: proxyConfig.server,
+          ...(proxyConfig.username ? { username: proxyConfig.username, password: proxyConfig.password ?? "" } : {}),
+        },
+      } : {}),
+    };
+
+    browser = await serializeLaunch(() => pw.chromium.launch(launchOpts));
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      userAgent:
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    });
+
+    page = await context.newPage();
+
+    logger.info({ verificationUrl }, "Navigating to 3DS verification URL");
+    await page.goto(verificationUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+
+    const otpHandled = await handle3dsOtpIfNeeded(page, askOtp, debugLabel);
+
+    if (otpHandled) {
+      logger.info("3DS OTP step completed in detached browser — waiting for final verification process");
+      await page.waitForTimeout(5000);
+      return true;
+    } else {
+      logger.warn("3DS OTP step failed or was skipped in detached browser");
+      return false;
+    }
+  } catch (err: any) {
+    logger.error({ err }, "Error in complete3dsVerificationWithPlaywright");
+    return false;
+  } finally {
+    if (page) await page.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
 export async function runFullPremiumFlow(
   client: TelegramClient,
   premiumBotUsername: string,
@@ -2758,7 +2825,34 @@ export async function runFullPremiumFlow(
 
   // ── Step 5b: Bank 3DS verification (PaymentVerificationNeeded) ───────────────
   if (payResult.verificationUrl) {
-    if (onVerificationNeeded) {
+    if (onAskOtp) {
+      await progress(`🔐 Bank 3DS tasdiqlash talab qildi — fon rejimida sahifa ochilmoqda...`);
+
+            let proxyCfg;
+      if (playwrightProxyIpId) {
+        const rows = await db.select().from(proxyIps).where(eq(proxyIps.id, playwrightProxyIpId)).limit(1);
+        if (rows[0]) {
+          proxyCfg = {
+            server: normaliseProxyServer(rows[0].server),
+            ...(rows[0].username ? { username: rows[0].username, password: rows[0].password ?? "" } : {}),
+            ipId: rows[0].id,
+          };
+        }
+      }
+      const success = await complete3dsVerificationWithPlaywright(
+        payResult.verificationUrl,
+        onAskOtp,
+        `3ds-verify-${premiumBotUsername}`,
+        proxyCfg
+      );
+
+      if (success) {
+        await progress(`✅ 3DS kodi kiritildi va tasdiqlandi!`);
+      } else {
+        await progress(`⚠️ 3DS jarayonida xatolik yuz berdi yoki kod kiritilmadi.`);
+      }
+    } else if (onVerificationNeeded) {
+      // Fallback if no OTP handler is provided but manual handler is
       await progress(
         `🔐 Bank 3DS tasdiqlash talab qildi — admin sahifani ochib kodni kiritsin...`,
       );
