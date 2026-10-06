@@ -83,6 +83,7 @@ export const pendingOtpCallbacks = new Map<string, (otp: string | null) => void>
 export const activeOtpFlow = new Map<number, string[]>();
 export const pendingStep6Callbacks = new Map<string, (choice: Step6Choice) => void>();
 export const pendingCardRetryCallbacks = new Map<string, (choice: number | "cancel") => void>();
+export const pendingNameEdits = new Map<number, (name: string) => void>();
 
 // Timestamp tracking for TTL cleanup
 const _otpTs  = new Map<string, number>();
@@ -357,7 +358,7 @@ export async function claimUserbotSession(
 
 // ── Status builder ────────────────────────────────────────────────────────────
 export async function buildOperatorStatusText(operatorId: number): Promise<string> {
-  const [client, sessions, masterRows, period] = await Promise.all([
+  const [client, sessions, masterRows, period, adminData] = await Promise.all([
     getMasterClient(operatorId),
     db.select().from(userbotSessions).where(eq(userbotSessions.ownerId, operatorId)),
     db.select({ slot: masterSessions.slot, phone: masterSessions.phone })
@@ -365,6 +366,7 @@ export async function buildOperatorStatusText(operatorId: number): Promise<strin
       .where(eq(masterSessions.operatorId, operatorId))
       .orderBy(asc(masterSessions.slot)),
     getCurrentPeriod(),
+    db.select({ threeDsMode: admins.threeDsMode }).from(admins).where(eq(admins.telegramUserId, operatorId)).limit(1),
   ]);
 
   const active  = sessions.filter((s) => s.status === "active").length;
@@ -389,9 +391,12 @@ export async function buildOperatorStatusText(operatorId: number): Promise<strin
     slotLabel = "Yo'q";
   }
 
+  const threeDsMode = adminData[0]?.threeDsMode || "auto";
+
   return (
     `${E.STATS} <b>Holat</b>\n\n` +
     `Operator: ${client ? `${E.OK} Ulangan (${slotLabel})` : `${E.NO} Ulanmagan`}\n` +
+    `3DS Rejim: <b>${threeDsMode === "auto" ? "Avto (Faqat kod kiritish)" : "Qo'lda (Link ochish)"}</b>\n` +
     `Userbot sessiyalar: <b>${sessions.length}</b> ta (${active} faol)\n` +
     `${E.STAR} Premium sessiyalar: <b>${premium}</b> ta\n\n` +
     `<b>${E.STATS} Statistika (Davr #${period.id}):</b>\n` +

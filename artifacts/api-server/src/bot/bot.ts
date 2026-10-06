@@ -10,7 +10,7 @@
  *  - OTP intercept text middleware (must run before other text handlers)
  *  - Operator-only middleware (after /start and /menu which self-check)
  */
-import { Bot } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 import { db } from "@workspace/db";
 import { admins } from "@workspace/db";
 import { eq } from "drizzle-orm";
@@ -27,6 +27,7 @@ import { initNotify, notifyError } from "./notify.js";
 import {
   isOperator,
   pendingOtpCallbacks,
+  pendingNameEdits,
   activeOtpFlow,
   removeActiveOtpFlow,
   sendMainMenu,
@@ -148,7 +149,17 @@ export function createBot() {
   // command or phone number. Only intercepts if this operator has a pending
   // OTP request AND the message looks like a 4-8 digit code.
   bot.on("message:text", async (ctx, next) => {
-    const userId = ctx.from?.id;
+    const userId = ctx.from.id;
+    const text = ctx.message.text?.trim() || "";
+
+    if (pendingNameEdits.has(userId)) {
+      const resolve = pendingNameEdits.get(userId);
+      pendingNameEdits.delete(userId);
+      if (resolve && text.length > 0) {
+        await resolve(text);
+        return; // Consumed
+      }
+    }
     if (!userId) return next();
     const pending = activeOtpFlow.get(userId);
     if (!pending || pending.length === 0) return next();
@@ -159,7 +170,6 @@ export function createBot() {
       removeActiveOtpFlow(userId, flowId);
       return next();
     }
-    const text = ctx.message.text.trim();
     if (!/^\d{4,8}$/.test(text)) return next(); // not a code — pass through
     // Consume the OTP: remove both Maps, resolve the waiting promise
     try {
@@ -184,7 +194,31 @@ export function createBot() {
   bot.callbackQuery("menu_status", async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
     const text = await buildOperatorStatusText(ctx.from.id);
-    await ctx.reply(text, { parse_mode: "HTML", reply_markup: menuButton() });
+    const kb = new InlineKeyboard()
+      .text("3DS Rejimni o'zgartirish", "toggle_3ds_mode")
+      .row()
+      .text("Bosh menyu", "menu_home").icon(E.HOME).primary();
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  });
+
+  bot.callbackQuery("toggle_3ds_mode", async (ctx) => {
+    const userId = ctx.from.id;
+    const [adminRow] = await db.select({ threeDsMode: admins.threeDsMode }).from(admins).where(eq(admins.telegramUserId, userId)).limit(1);
+    if (!adminRow) {
+      await ctx.answerCallbackQuery("Siz botda operator sifatida qayd etilmagansiz.").catch(() => {});
+      return;
+    }
+    const newMode = adminRow.threeDsMode === "auto" ? "manual" : "auto";
+    await db.update(admins).set({ threeDsMode: newMode }).where(eq(admins.telegramUserId, userId));
+    await ctx.answerCallbackQuery(`3DS rejim o'zgartirildi: ${newMode}`).catch(() => {});
+
+    // Update message
+    const text = await buildOperatorStatusText(ctx.from.id);
+    const kb = new InlineKeyboard()
+      .text("3DS Rejimni o'zgartirish", "toggle_3ds_mode")
+      .row()
+      .text("Bosh menyu", "menu_home").icon(E.HOME).primary();
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
   });
 
   // ── Register all feature handler modules ──────────────────────────────────

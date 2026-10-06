@@ -7,7 +7,7 @@
  */
 import { Bot, InlineKeyboard } from "grammy";
 import { db } from "@workspace/db";
-import { userbotSessions, savedCards, cardUsages, pendingNumbers } from "@workspace/db";
+import { userbotSessions, savedCards, cardUsages, pendingNumbers, admins } from "@workspace/db";
 import { eq, and, desc, gte } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { E, EID } from "../../lib/emoji.js";
@@ -132,6 +132,8 @@ export function registerPremiumHandlers(bot: Bot): void {
   // ── /getpremium — single phone premium flow ───────────────────────────────
   bot.command("getpremium", async (ctx) => {
     const operatorId = ctx.from!.id;
+    const [adminRow] = await db.select({ threeDsMode: admins.threeDsMode }).from(admins).where(eq(admins.telegramUserId, operatorId)).limit(1);
+    const threeDsMode = adminRow?.threeDsMode || "auto";
     if (!await isOperator(operatorId)) return;
 
     const phone = ctx.match?.trim();
@@ -249,25 +251,50 @@ export function registerPremiumHandlers(bot: Bot): void {
                 });
                 step6Promise?.catch(() => {});
 
-                const keyboard = new InlineKeyboard()
-                  .url("3DS tasdiqlash", verificationUrl).icon(EID.LOCK)
-                  .row()
-                  .text("3DS Tugadi — Davom et", `step6_done:${attemptId}`).icon(EID.OK).success()
-                  .row()
-                  .text("Evro (qayta urinish)", `step6_euro:${attemptId}`).icon(EID.REFRESH).primary()
-                  .text("Bekor qilish", `step6_abort:${attemptId}`).icon(EID.NO).danger();
+                if (threeDsMode === "manual") {
+                  const keyboard = new InlineKeyboard()
+                    .url("3DS tasdiqlash", verificationUrl).icon(EID.LOCK)
+                    .row()
+                    .text("3DS Tugadi — Davom et", `step6_done:${attemptId}`).icon(EID.OK).success()
+                    .row()
+                    .text("Evro (qayta urinish)", `step6_euro:${attemptId}`).icon(EID.REFRESH).primary()
+                    .text("Bekor qilish", `step6_abort:${attemptId}`).icon(EID.NO).danger();
 
-                const sent = await ctx.api.sendMessage(
-                  chatId,
-                  `🔐 <b>Bank 3DS tasdiqlash talab qildi!</b>\n\n` +
-                    `1️⃣ Quyidagi tugmani bosib brauzerda oching\n` +
-                    `2️⃣ Bank SMS kodini kiritib tasdiqlang\n` +
-                    `3️⃣ <b>✅ 3DS Tugadi — Davom et</b> tugmasini bosing\n\n` +
-                    `💶 Evro chiqsa — <b>Evro (qayta urinish)</b> tugmasini bosing\n\n` +
-                    `🤖 Yoki hech narsa bosmasangiz ham, bot @${PREMIUM_BOT} ga har 20 soniyada /start yuborib avtomatik tekshiradi.`,
-                  { parse_mode: "HTML", reply_markup: keyboard },
-                ).catch(() => null);
-                step6MsgId = sent?.message_id ?? null;
+                  const sent = await ctx.api.sendMessage(
+                    chatId,
+                    `🔐 <b>Bank 3DS tasdiqlash talab qildi!</b>\n\n` +
+                      `1️⃣ Quyidagi tugmani bosib brauzerda oching\n` +
+                      `2️⃣ Bank SMS kodini kiritib tasdiqlang\n` +
+                      `3️⃣ <b>✅ 3DS Tugadi — Davom et</b> tugmasini bosing\n\n` +
+                      `💶 Evro chiqsa — <b>Evro (qayta urinish)</b> tugmasini bosing\n\n` +
+                      `🤖 Yoki hech narsa bosmasangiz ham, bot @${PREMIUM_BOT} ga har 20 soniyada /start yuborib avtomatik tekshiradi.`,
+                    { parse_mode: "HTML", reply_markup: keyboard },
+                  ).catch(() => null);
+                  step6MsgId = sent?.message_id ?? null;
+                } else {
+                  // auto mode -> just ask for OTP inline
+                  const keyboard = new InlineKeyboard()
+                    .text("Evro (qayta urinish)", `step6_euro:${attemptId}`).icon(EID.REFRESH).primary()
+                    .text("Bekor qilish", `step6_abort:${attemptId}`).icon(EID.NO).danger();
+
+                  pendingOtpCallbacks.set(attemptId, (otp) => {
+                    pendingOtpCallbacks.delete(attemptId);
+                    clearOtpTs(attemptId);
+                    removeActiveOtpFlow(operatorId, attemptId);
+                    // We don't resolve the 3DS promise yet, wait for auto-detect or manual abort
+                  });
+                  trackOtpTs(attemptId);
+                  addActiveOtpFlow(operatorId, attemptId);
+
+                  const sent = await ctx.api.sendMessage(
+                    chatId,
+                    `🔐 <b>Bank 3DS kod so'ramoqda!</b>\n\n` +
+                    `📱 Kartangiz raqamiga yuborilgan SMS kodni shu yerga yuboring (120 soniya).\n\n` +
+                    `<i>Misol: 123456</i>`,
+                    { parse_mode: "HTML", reply_markup: keyboard },
+                  ).catch(() => null);
+                  step6MsgId = sent?.message_id ?? null;
+                }
 
                 // Auto-detect fallback
                 (async () => {
@@ -475,6 +502,8 @@ export function registerPremiumHandlers(bot: Bot): void {
     }
 
     const operatorId = ctx.from.id;
+    const [adminRow] = await db.select({ threeDsMode: admins.threeDsMode }).from(admins).where(eq(admins.telegramUserId, operatorId)).limit(1);
+    const threeDsMode = adminRow?.threeDsMode || "auto";
     if (batchPremiumRunning.has(operatorId)) {
       await ctx.answerCallbackQuery("⏳ Premium jarayoni allaqachon davom etmoqda, kuting.").catch(() => {});
       return;
@@ -599,6 +628,8 @@ export function registerPremiumHandlers(bot: Bot): void {
 
   // ── batch_premium execution function ─────────────────────────────────────────
   async function startBatchPremiumExecution(ctx: any, operatorId: number, state: { totalRequested: number, selections: {cardId: number, uses: number}[] }) {
+    const [adminRow] = await db.select({ threeDsMode: admins.threeDsMode }).from(admins).where(eq(admins.telegramUserId, operatorId)).limit(1);
+    const threeDsMode = adminRow?.threeDsMode || "auto";
     pendingBatchPremium.delete(operatorId); // Consume the state
 
     if (batchPremiumRunning.has(operatorId)) {
@@ -809,23 +840,45 @@ export function registerPremiumHandlers(bot: Bot): void {
                     });
                     step6Promise?.catch(() => {});
 
-                    const keyboard = new InlineKeyboard()
-                      .url("🔐 3DS tasdiqlash", verificationUrl)
-                      .row()
-                      .text("✅ 3DS Tugadi — Davom et", `step6_done:${attemptId}`)
-                      .row()
-                      .text("💶 Evro (qayta urinish)", `step6_euro:${attemptId}`)
-                      .text("❌ Bekor qilish", `step6_abort:${attemptId}`);
-                    await sendOrEditAction(
-                      phone,
-                      `🔐 <b>${step}/${targets.length}: <code>${phone}</code> — Bank 3DS!</b>\n\n` +
-                        `1️⃣ Quyidagi tugmani bosib brauzerda oching\n` +
-                        `2️⃣ Bank SMS kodini kiritib tasdiqlang\n` +
-                        `3️⃣ <b>✅ 3DS Tugadi — Davom et</b> tugmasini bosing\n\n` +
-                        `💶 Evro chiqsa — <b>Evro (qayta urinish)</b> tugmasini bosing\n\n` +
-                        `🤖 Yoki hech narsa bosmasangiz ham, bot @${PREMIUM_BOT} ga har 20 soniyada /start yuborib avtomatik tekshiradi.`,
-                      keyboard,
-                    );
+                    if (threeDsMode === "manual") {
+                      const keyboard = new InlineKeyboard()
+                        .url("🔐 3DS tasdiqlash", verificationUrl)
+                        .row()
+                        .text("✅ 3DS Tugadi — Davom et", `step6_done:${attemptId}`)
+                        .row()
+                        .text("💶 Evro (qayta urinish)", `step6_euro:${attemptId}`)
+                        .text("❌ Bekor qilish", `step6_abort:${attemptId}`);
+                      await sendOrEditAction(
+                        phone,
+                        `🔐 <b>${step}/${targets.length}: <code>${phone}</code> — Bank 3DS!</b>\n\n` +
+                          `1️⃣ Quyidagi tugmani bosib brauzerda oching\n` +
+                          `2️⃣ Bank SMS kodini kiritib tasdiqlang\n` +
+                          `3️⃣ <b>✅ 3DS Tugadi — Davom et</b> tugmasini bosing\n\n` +
+                          `💶 Evro chiqsa — <b>Evro (qayta urinish)</b> tugmasini bosing\n\n` +
+                          `🤖 Yoki hech narsa bosmasangiz ham, bot @${PREMIUM_BOT} ga har 20 soniyada /start yuborib avtomatik tekshiradi.`,
+                        keyboard,
+                      );
+                    } else {
+                      const keyboard = new InlineKeyboard()
+                        .text("💶 Evro (qayta urinish)", `step6_euro:${attemptId}`)
+                        .text("❌ Bekor qilish", `step6_abort:${attemptId}`);
+
+                      pendingOtpCallbacks.set(attemptId, (otp) => {
+                        pendingOtpCallbacks.delete(attemptId);
+                        clearOtpTs(attemptId);
+                        removeActiveOtpFlow(operatorId, attemptId);
+                      });
+                      trackOtpTs(attemptId);
+                      addActiveOtpFlow(operatorId, attemptId);
+
+                      await sendOrEditAction(
+                        phone,
+                        `🔐 <b>${step}/${targets.length}: <code>${phone}</code> — Bank 3DS kod so'ramoqda!</b>\n\n` +
+                          `📱 Kartangiz raqamiga yuborilgan SMS kodni shu yerga yuboring (120 soniya).\n\n` +
+                          `<i>Misol: 123456</i>`,
+                        keyboard,
+                      );
+                    }
 
                     triggerRelayNext(relayIndex);
 

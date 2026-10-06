@@ -18,6 +18,7 @@ export const admins = pgTable("admins", {
   isSuperAdmin: boolean("is_super_admin").notNull().default(false),
   isBlocked: boolean("is_blocked").notNull().default(false),
   addedBySuperAdminId: bigint("added_by_super_admin_id", { mode: "number" }), // null = env seeded
+  threeDsMode: text("three_ds_mode").notNull().default("auto"), // 'auto' or 'manual'
   createdAt: timestamp("created_at").defaultNow().notNull(),
   blockedAt: timestamp("blocked_at"),
 });
