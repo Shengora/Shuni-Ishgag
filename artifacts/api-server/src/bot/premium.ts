@@ -1849,6 +1849,7 @@ export async function sendPaymentFormToTelegram(
   invoiceMsg: any,
   formId: bigint,
   credentials?: string,
+  cardHolderName?: string,
 ): Promise<SendPaymentResult> {
   try {
     const peer = await client.getInputEntity(botUsername);
@@ -1883,6 +1884,29 @@ export async function sendPaymentFormToTelegram(
       logger.warn("Sending payment form with empty credentials (no token captured)");
     }
 
+    let requestedInfoId: string | undefined;
+
+    if (cardHolderName) {
+      try {
+        const validateResult = await client.invoke(
+          new Api.payments.ValidateRequestedInfo({
+            save: false,
+            invoice: new Api.InputInvoiceMessage({
+              peer: peer as any,
+              msgId: invoiceMsg.id,
+            }),
+            info: new Api.PaymentRequestedInfo({
+              name: cardHolderName,
+            }),
+          })
+        );
+        requestedInfoId = (validateResult as any).id;
+        logger.info({ requestedInfoId }, "Validated requested info (name) successfully");
+      } catch (err: any) {
+        logger.warn({ err: err?.message }, "Failed to validate requested info, proceeding without it");
+      }
+    }
+
     const result = await client.invoke(
       new Api.payments.SendPaymentForm({
         invoice: new Api.InputInvoiceMessage({
@@ -1890,6 +1914,7 @@ export async function sendPaymentFormToTelegram(
           msgId: invoiceMsg.id,
         }),
         formId: formId as any,
+        ...(requestedInfoId ? { requestedInfoId } : {}),
         credentials: credentialsInput,
       }),
     );
@@ -2732,6 +2757,7 @@ export async function runFullPremiumFlow(
     invoiceMsg,
     paymentFormInfo.formId,
     credentials,
+    card.cardHolder,
   );
 
   if (!payResult.success) {
