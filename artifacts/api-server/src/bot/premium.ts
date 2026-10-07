@@ -1712,6 +1712,55 @@ export async function payPremiumViaWebApp(
       return { submitted: false, errorDetail: "Sahifada to'lov tugmasi (Pay/Submit) topilmadi" };
     }
 
+    // ── Handle multi-step form (e.g. Cardholder Name on next page) ────────────
+    // Sometimes the initial submit just proceeds to a new step asking for the Name.
+    let secondStepNameFilled = false;
+    for (let check = 0; check < 5; check++) { // wait up to 2.5s for the next step UI
+      await page.waitForTimeout(500);
+
+      let nameInputFound = false;
+      for (const sel of SELECTORS.holder) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 500 }).catch(() => false)) {
+            // Check if it's empty
+            const val = await el.inputValue().catch(() => "");
+            if (!val.trim()) {
+               await humanFill(el, card.cardHolder);
+               logger.info({ sel }, "Filled card holder on second step");
+            }
+            nameInputFound = true;
+            break;
+          }
+        } catch (_) {}
+      }
+
+      if (nameInputFound) {
+        secondStepNameFilled = true;
+        break; // found and filled
+      }
+    }
+
+    // If we filled a new field on the second step, try to click a submit/done button again.
+    if (secondStepNameFilled) {
+      let secondClicked = false;
+      for (const sel of SELECTORS.payButton) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await el.click({ timeout: 5000 });
+            secondClicked = true;
+            logger.info({ sel }, "Clicked pay/done button on second step");
+            break;
+          }
+        } catch (_) {}
+      }
+
+      if (!secondClicked) {
+        logger.warn("Filled name on second step, but no submit/done button found");
+      }
+    }
+
     // ── Handle 3DS OTP if the bank requires it ────────────────────────────────
     // After clicking pay, some banks redirect to a 3DS page asking for an SMS
     // code.  If askOtp is provided, wait for the OTP input to appear (up to
@@ -2748,7 +2797,7 @@ export async function runFullPremiumFlow(
       hasPremium: false,
       message: isPaymentDeclined
         ? "Bank kartani rad etdi (PAYMENT_FAILED) — boshqa karta sinab ko'ring"
-        : "payments.SendPaymentForm xatosi — to'lov o'tmadi",
+        : `payments.SendPaymentForm xatosi ${payResult.errorCode ? `(${payResult.errorCode})` : ""} — to'lov o'tmadi`,
       paymentDeclined: isPaymentDeclined,
     };
   }

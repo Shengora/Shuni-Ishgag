@@ -17,11 +17,11 @@ export function registerCardsHandlers(bot: Bot): void {
 
   const ADDCARD_USAGE =
     `${E.CARD} <b>Karta qo'shish</b>\n\n` +
-    `Format:\n<code>/addcard BANK_NOMI KARTA_RAQAMI MM/YY CVV</code>\n\n` +
+    `Format:\n<code>/addcard BANK_NOMI KARTA_RAQAMI MM/YY CVV ISM SHARIF</code>\n\n` +
     `Misollar:\n` +
-    `<code>/addcard Kapital 4111111111111111 12/26 123</code>\n` +
-    `<code>/addcard Uzcard 8600123456781234 03/28 456</code>\n` +
-    `<code>/addcard Humo 9860123456781234 07/27 789</code>`;
+    `<code>/addcard Kapital 4111111111111111 12/26 123 Alisher Valiyev</code>\n` +
+    `<code>/addcard Uzcard 8600123456781234 03/28 456 Sardor</code>\n` +
+    `<code>/addcard Humo 9860123456781234 07/27 789 Nodir</code>`;
 
   // ── /addcard ──────────────────────────────────────────────────────────────
   bot.command("addcard", async (ctx) => {
@@ -30,22 +30,55 @@ export function registerCardsHandlers(bot: Bot): void {
 
     const raw = ctx.match?.trim() || "";
 
-    // We expect 4 logical parts. However, since the user might enter spaces in the card number
-    // e.g. "BankName 1234 5678 1234 5678 12/26 123", we should process it gracefully.
-    // The last two parts are always Expiry and CVV.
+    // We expect at least 5 logical parts now: Bank, Card, Expiry, CVV, Name
+    // However, card number and name might have spaces.
     const parts = raw.split(/\s+/);
-    if (parts.length < 4) {
+    if (parts.length < 5) {
       await ctx.reply(ADDCARD_USAGE, { parse_mode: "HTML" });
       return;
     }
 
-    const bankName   = parts[0];
-    const cvv        = parts[parts.length - 1];
-    const expiryRaw  = parts[parts.length - 2];
+    const bankName = parts[0];
 
-    // The card number could be everything between the bankName and expiryRaw
-    const cardParts = parts.slice(1, parts.length - 2);
+    // Find the indices for MM/YY and CVV. They should be somewhere in the middle before the name.
+    // Usually the format is: Bank [Card...] MM/YY CVV [Name...]
+    // We scan from left to right to find the expiry (MM/YY or MMYY) and assume the next token is CVV.
+    let expiryIndex = -1;
+    for (let i = 1; i < parts.length - 1; i++) {
+      if (/^\d{2}\/\d{2}$/.test(parts[i]) || /^\d{4}$/.test(parts[i])) {
+        // If it looks like expiry and the next one looks like CVV (3-4 digits)
+        if (/^\d{3,4}$/.test(parts[i + 1])) {
+          expiryIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (expiryIndex === -1) {
+      // Fallback: if we didn't find the exact match, assume old logic relative positions from the end of card,
+      // but we need the user to input Name. Let's just use regex on the whole string to extract parts reliably.
+      await ctx.reply(
+        `${E.NO} Format noto'g'ri. Iltimos kartadan keyin Muddat (MM/YY) va CVV, so'ngra ism-sharifingizni kiriting.\nMisol: <code>/addcard Kapital 4111 1111 1111 1111 12/26 123 Alisher Valiyev</code>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    const expiryRaw = parts[expiryIndex];
+    const cvv = parts[expiryIndex + 1];
+
+    // Card number is everything between bankName and expiry
+    const cardParts = parts.slice(1, expiryIndex);
     const cardNumber = cardParts.join("").replace(/\D/g, "");
+
+    // Name is everything after CVV
+    const nameParts = parts.slice(expiryIndex + 2);
+    const cardHolder = nameParts.join(" ").trim();
+
+    if (!cardHolder) {
+      await ctx.reply(`${E.NO} Ism-sharif ko'rsatilmagan. Iltimos, oxirida ismingizni kiriting.`, { parse_mode: "HTML" });
+      return;
+    }
 
     // Normalise to MM/YY canonical format (premium.ts expects "MM/YY" for split("/"))
     const expiryDigits = expiryRaw.replace(/\D/g, "");
@@ -87,7 +120,7 @@ export function registerCardsHandlers(bot: Bot): void {
 
     await db.insert(savedCards).values({
       userId,
-      cardHolder: bankName, // used for Stripe cardholder name
+      cardHolder, // Full name of the user
       bankName,
       cardNumber,
       cardNumberMasked,
