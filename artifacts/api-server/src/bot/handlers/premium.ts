@@ -9,6 +9,7 @@ import { Bot, InlineKeyboard } from "grammy";
 import { db } from "@workspace/db";
 import { userbotSessions, savedCards, cardUsages, pendingNumbers } from "@workspace/db";
 import { eq, and, desc, gte } from "drizzle-orm";
+import { InputFile } from "grammy";
 import { logger } from "../../lib/logger.js";
 import { E, EID } from "../../lib/emoji.js";
 import { recordStat } from "../super-admin.js";
@@ -871,6 +872,18 @@ export function registerPremiumHandlers(bot: Bot): void {
                     ? `${step}. ⭐ <code>${phone}</code>${expStr}${autoRenewalStr}`
                     : `${step}. ✅ <code>${phone}</code> — ${result.message}${autoRenewalStr}`;
                   break;
+                }
+
+                // If a screenshot was taken during failure, send it to the operator
+                if (result.screenshotPath) {
+                  try {
+                    await ctx.api.sendPhoto(chatId, new InputFile(result.screenshotPath), {
+                      caption: `📸 <b>${phone}</b> — Karta formasi xatosi (Screenshot)`,
+                      parse_mode: "HTML"
+                    });
+                  } catch (photoErr) {
+                    logger.warn({ photoErr, screenshotPath: result.screenshotPath }, "Failed to send failure screenshot to Telegram");
+                  }
                 }
 
                 // Same-card retry (fresh IP)
