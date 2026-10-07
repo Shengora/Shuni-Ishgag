@@ -1685,6 +1685,28 @@ export async function payPremiumViaWebApp(
       }
     }
 
+    // ── Wait and check if "Full Name" field appears dynamically after filling card ──
+    let nameFilledLate = false;
+    for (let check = 0; check < 5; check++) { // wait up to 2.5s for dynamic name field to appear
+      let nameInputFound = false;
+      for (const sel of SELECTORS.holder) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 500 }).catch(() => false)) {
+            const val = await el.inputValue().catch(() => "");
+            if (!val.trim()) {
+              await humanFill(el, card.cardHolder);
+              logger.info({ sel }, "Filled card holder dynamically before submit");
+              nameFilledLate = true;
+            }
+            nameInputFound = true;
+            break;
+          }
+        } catch (_) {}
+      }
+      if (nameInputFound) break; // if found, we don't need to keep checking
+    }
+
     // ── Click Pay/Submit button ───────────────────────────────────────────────
     let clicked = false;
     for (const sel of SELECTORS.payButton) {
