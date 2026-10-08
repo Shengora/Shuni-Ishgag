@@ -1731,28 +1731,48 @@ export async function payPremiumViaWebApp(
     await page.waitForTimeout(1000); // Wait for potential SPA transition
 
     let fullNameHandled = false;
-    try {
-      const allHolderSelectors = SELECTORS.holder.join(", ");
-      const nameInput = page.locator(allHolderSelectors).first();
-      // Wait once for any of the selectors to become visible (fast failure if not present)
-      await nameInput.waitFor({ state: "visible", timeout: 2000 });
-
-      logger.info("Found Full name field (Phase 2), filling it");
-      await humanFill(nameInput, card.cardHolder);
-      fullNameHandled = true;
-    } catch (_) {
-      // Field never appeared, which is fine (Phase 2 is optional)
+    for (const sel of SELECTORS.holder) {
+      try {
+        const el = page.locator(sel).first();
+        if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
+          logger.info({ sel }, "Found Full name field (Phase 2), filling it");
+          await humanFill(el, card.cardHolder);
+          fullNameHandled = true;
+          break;
+        }
+      } catch (_) {}
     }
 
     if (fullNameHandled) {
       logger.info("Clicking Done / Submit button for Phase 2");
-      try {
-         const allBtnSelectors = SELECTORS.payButton.join(", ");
-         const submitBtn = page.locator(allBtnSelectors).first();
-         await submitBtn.waitFor({ state: "visible", timeout: 2000 });
-         await submitBtn.click({ timeout: 5000 });
-         logger.info("Clicked pay/done button for Phase 2");
-      } catch (_) {
+      await page.waitForTimeout(500); // Short delay to let the UI register the input
+
+      let phase2Clicked = false;
+      for (const sel of SELECTORS.payButton) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
+            await el.click({ timeout: 5000 });
+            phase2Clicked = true;
+            logger.info({ sel }, "Clicked pay/done button for Phase 2");
+            break;
+          }
+        } catch (_) {}
+      }
+
+      if (!phase2Clicked) {
+        // Look for the generic "Done" button specifically seen in Phase 2
+        try {
+          const doneBtn = page.getByText("Done", { exact: true }).first();
+          if (await doneBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+             await doneBtn.click({ timeout: 5000 });
+             phase2Clicked = true;
+             logger.info("Clicked literal 'Done' button for Phase 2");
+          }
+        } catch (_) {}
+      }
+
+      if (!phase2Clicked) {
          logger.warn("Could not find submit button for Phase 2, skipping fallback to prevent clicking Cancel");
       }
     }
