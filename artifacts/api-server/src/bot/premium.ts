@@ -467,6 +467,8 @@ export interface PremiumFlowResult {
    * different saved card instead of just marking the target failed.
    */
   paymentDeclined?: boolean;
+  /** Path to screenshot file if Playwright tokenization failed. */
+  screenshotPath?: string;
 }
 
 // ── Centralized selector config ───────────────────────────────────────────────
@@ -518,12 +520,17 @@ const SELECTORS = {
   ],
   /** Card holder name inputs */
   holder: [
+    // Smart Glocal "Customer info" -> "Full name"
+    'input[name="paymentDetails.customer.fullName"]',
+    'input[name="fullName"]',
+    'input[placeholder="Full name"]',
     'input[autocomplete="cc-name"]',
     'input[name="cardholder"]',
     'input[name="holder"]',
     'input[name="card_holder"]',
     'input[placeholder*="holder"]',
     'input[placeholder*="name"]',
+    'input[placeholder*="Name"]',
     'input[placeholder*="ism"]',
     'input[data-field="holder"]',
   ],
@@ -594,15 +601,17 @@ function waitForBotMsg(
 }
 
 /** Save a Playwright screenshot to /tmp for diagnosis */
-async function saveFailureScreenshot(page: any, label: string): Promise<void> {
+async function saveFailureScreenshot(page: any, label: string): Promise<string | undefined> {
   try {
     const ts = Date.now();
     const filePath = join(tmpdir(), `premium-fail-${label}-${ts}.png`);
     const screenshotBuf: Buffer = await page.screenshot({ fullPage: true });
     await writeFile(filePath, screenshotBuf);
     logger.warn({ screenshotPath: filePath }, "Saved failure screenshot");
+    return filePath;
   } catch (err) {
     logger.warn({ err }, "Could not save failure screenshot");
+    return undefined;
   }
 }
 
@@ -904,6 +913,8 @@ export interface PlaywrightCardResult {
   cardBlocked?: boolean;
   /** Detailed technical error message if submitted is false and card is not blocked */
   errorDetail?: string;
+  /** Path to the saved screenshot if available */
+  screenshotPath?: string;
 }
 
 /**
@@ -1631,7 +1642,8 @@ export async function payPremiumViaWebApp(
         }
         logger.warn("No card inputs found on page — check pre-fill screenshot");
         await logVisibleHtml(page);
-        return { submitted: false, errorDetail: "Sahifada hech qanday input maydoni topilmadi (HTML o'zgargan bo'lishi mumkin)" };
+        const screenshotPath = await saveFailureScreenshot(page, debugLabel);
+        return { submitted: false, errorDetail: "Sahifada hech qanday input maydoni topilmadi (HTML o'zgargan bo'lishi mumkin)", screenshotPath };
       }
 
       let filledCard = false;
@@ -1673,7 +1685,8 @@ export async function payPremiumViaWebApp(
         logger.warn({ filledCard, filledExp, filledCvc, inputCount: allInputs.length },
           "Could not identify all card fields — check pre-fill screenshot and HTML");
         await logVisibleHtml(page);
-        return { submitted: false, errorDetail: `Kerakli maydonlar topilmadi (Karta: ${filledCard}, Muddat: ${filledExp}, CVV: ${filledCvc})` };
+        const screenshotPath = await saveFailureScreenshot(page, debugLabel);
+        return { submitted: false, errorDetail: `Kerakli maydonlar topilmadi (Karta: ${filledCard}, Muddat: ${filledExp}, CVV: ${filledCvc})`, screenshotPath };
       }
     }
 
@@ -1708,8 +1721,40 @@ export async function payPremiumViaWebApp(
         return { submitted: false, cardBlocked: true };
       }
       logger.warn("Could not find any submit button");
-      await saveFailureScreenshot(page, debugLabel);
-      return { submitted: false, errorDetail: "Sahifada to'lov tugmasi (Pay/Submit) topilmadi" };
+      const screenshotPath = await saveFailureScreenshot(page, debugLabel);
+      return { submitted: false, errorDetail: "Sahifada to'lov tugmasi (Pay/Submit) topilmadi", screenshotPath };
+    }
+
+    // ── Handle Phase 2: "Customer Info" / "Full name" ─────────────────────────
+    // Sometimes after clicking Pay, it asks for Full Name. We check if such a field appears.
+    logger.info("Checking if a 'Full name' field appears (Phase 2 of payment form)");
+    await page.waitForTimeout(1000); // Wait for potential SPA transition
+
+    let fullNameHandled = false;
+    try {
+      const allHolderSelectors = SELECTORS.holder.join(", ");
+      const nameInput = page.locator(allHolderSelectors).first();
+      // Wait once for any of the selectors to become visible (fast failure if not present)
+      await nameInput.waitFor({ state: "visible", timeout: 2000 });
+
+      logger.info("Found Full name field (Phase 2), filling it");
+      await humanFill(nameInput, card.cardHolder);
+      fullNameHandled = true;
+    } catch (_) {
+      // Field never appeared, which is fine (Phase 2 is optional)
+    }
+
+    if (fullNameHandled) {
+      logger.info("Clicking Done / Submit button for Phase 2");
+      try {
+         const allBtnSelectors = SELECTORS.payButton.join(", ");
+         const submitBtn = page.locator(allBtnSelectors).first();
+         await submitBtn.waitFor({ state: "visible", timeout: 2000 });
+         await submitBtn.click({ timeout: 5000 });
+         logger.info("Clicked pay/done button for Phase 2");
+      } catch (_) {
+         logger.warn("Could not find submit button for Phase 2, skipping fallback to prevent clicking Cancel");
+      }
     }
 
     // ── Handle 3DS OTP if the bank requires it ────────────────────────────────
@@ -1798,8 +1843,9 @@ export async function payPremiumViaWebApp(
       logger.error({ err }, "payPremiumViaWebApp error");
       // Screenshot only while the browser is still alive — after a watchdog kill
       // the page is gone and page.screenshot() would itself hang.
-      if (page) await saveFailureScreenshot(page, debugLabel).catch(() => {});
-      return { submitted: false, errorDetail: errorMsg };
+      let screenshotPath: string | undefined;
+      if (page) screenshotPath = await saveFailureScreenshot(page, debugLabel).catch(() => undefined);
+      return { submitted: false, errorDetail: errorMsg, screenshotPath };
     }
   } finally {
     // Cancel the watchdog first so it doesn't fire again after we've cleaned up.
@@ -2704,8 +2750,9 @@ export async function runFullPremiumFlow(
         hasPremium: false,
         message: playwrightResult.cardBlocked
           ? "Karta anti-fraud tomonidan bloklandi (to'lov sahifasida xato ko'rsatildi)"
-          : `Karta formasi to'ldirishda xato${techError} — /tmp/premium-fail-*.png ga screenshot saqlandi`,
+          : `Karta formasi to'ldirishda xato${techError}`,
         paymentDeclined: playwrightResult.cardBlocked,
+        screenshotPath: playwrightResult.screenshotPath,
       };
     }
 

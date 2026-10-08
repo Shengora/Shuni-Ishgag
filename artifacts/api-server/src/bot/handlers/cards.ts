@@ -17,10 +17,10 @@ export function registerCardsHandlers(bot: Bot): void {
 
   const ADDCARD_USAGE =
     `${E.CARD} <b>Karta qo'shish</b>\n\n` +
-    `Format:\n<code>/addcard BANK_NOMI KARTA_RAQAMI MM/YY CVV</code>\n\n` +
+    `Format:\n<code>/addcard BANK_NOMI KARTA_RAQAMI MM/YY CVV [ISMI_FAMILIYASI]</code>\n\n` +
     `Misollar:\n` +
     `<code>/addcard Kapital 4111111111111111 12/26 123</code>\n` +
-    `<code>/addcard Uzcard 8600123456781234 03/28 456</code>\n` +
+    `<code>/addcard Uzcard 8600123456781234 03/28 456 JAVLON BEKMATOV</code>\n` +
     `<code>/addcard Humo 9860123456781234 07/27 789</code>`;
 
   // ── /addcard ──────────────────────────────────────────────────────────────
@@ -30,21 +30,46 @@ export function registerCardsHandlers(bot: Bot): void {
 
     const raw = ctx.match?.trim() || "";
 
-    // We expect 4 logical parts. However, since the user might enter spaces in the card number
-    // e.g. "BankName 1234 5678 1234 5678 12/26 123", we should process it gracefully.
-    // The last two parts are always Expiry and CVV.
+    // We expect at least 4 logical parts.
+    // e.g. "BankName 1234 5678 1234 5678 12/26 123 [Card Holder Name]"
+    // If there's a card holder name, it's everything after CVV.
     const parts = raw.split(/\s+/);
     if (parts.length < 4) {
       await ctx.reply(ADDCARD_USAGE, { parse_mode: "HTML" });
       return;
     }
 
-    const bankName   = parts[0];
-    const cvv        = parts[parts.length - 1];
-    const expiryRaw  = parts[parts.length - 2];
+    const bankName = parts[0];
+
+    // Find the index of the CVV (last part that is 3-4 digits, typically before optional name)
+    // Expiry is right before it
+    let expiryIndex = -1;
+    let cvvIndex = -1;
+
+    // Traverse backwards to find CVV (3-4 digits) and Expiry (contains '/')
+    for (let i = parts.length - 1; i >= 1; i--) {
+        if (/^\d{3,4}$/.test(parts[i]) && i > 0 && /^\d{2}\/\d{2,4}$|^\d{4,6}$/.test(parts[i-1])) {
+            cvvIndex = i;
+            expiryIndex = i - 1;
+            break;
+        }
+    }
+
+    if (cvvIndex === -1 || expiryIndex === -1) {
+        // Fallback to original logic if we couldn't confidently find expiry and cvv
+        cvvIndex = parts.length - 1;
+        expiryIndex = parts.length - 2;
+    }
+
+    const cvv = parts[cvvIndex];
+    const expiryRaw = parts[expiryIndex];
+
+    // Card holder name is anything after the CVV
+    const cardHolderNameParts = parts.slice(cvvIndex + 1);
+    const cardHolderName = cardHolderNameParts.length > 0 ? cardHolderNameParts.join(" ") : bankName;
 
     // The card number could be everything between the bankName and expiryRaw
-    const cardParts = parts.slice(1, parts.length - 2);
+    const cardParts = parts.slice(1, expiryIndex);
     const cardNumber = cardParts.join("").replace(/\D/g, "");
 
     // Normalise to MM/YY canonical format (premium.ts expects "MM/YY" for split("/"))
@@ -87,7 +112,7 @@ export function registerCardsHandlers(bot: Bot): void {
 
     await db.insert(savedCards).values({
       userId,
-      cardHolder: bankName, // used for Stripe cardholder name
+      cardHolder: cardHolderName, // used for Playwright fill and Stripe cardholder name
       bankName,
       cardNumber,
       cardNumberMasked,
@@ -102,6 +127,7 @@ export function registerCardsHandlers(bot: Bot): void {
     await ctx.reply(
       `${E.OK} <b>Karta qo'shildi!</b>\n\n` +
       `🏦 Bank: <b>${bankName}</b>\n` +
+      `👤 Karta egasi: <b>${cardHolderName}</b>\n` +
       `💳 Raqam: <code>${maskedFull}</code>\n` +
       `📅 Muddat: ${expiry}\n` +
       (isDefault ? `\n${E.STAR} Asosiy karta sifatida belgilandi` : ""),
