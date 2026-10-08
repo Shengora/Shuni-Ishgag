@@ -308,6 +308,16 @@ export function registerPremiumHandlers(bot: Bot): void {
                 ? `${result.hasPremium ? "⭐" : "✅"} <b>${result.message}</b>\n\n📱 Raqam: <code>${phone}</code>${expStr}${autoRenewalStr}`
                 : `❌ <b>Xato yuz berdi</b>\n\n${result.message}`,
             );
+
+            if (!result.success && result.screenshotPath) {
+               try {
+                   const { InputFile } = await import("grammy");
+                   await ctx.replyWithPhoto(new InputFile(result.screenshotPath), { caption: "To'lov formasidagi xato skrinshoti" });
+               } catch (err) {
+                   logger.warn({ err }, "Could not send failure screenshot");
+               }
+            }
+
             await ctx.reply(
               result.success ? "✅ Jarayon yakunlandi." : "❌ Premium olinmadi.",
               { reply_markup: menuButton() },
@@ -942,6 +952,14 @@ export function registerPremiumHandlers(bot: Bot): void {
 
                 failed++;
                 lines[step - 1] = `${step}. ❌ <code>${phone}</code> — ${result.message}`;
+                if (result.screenshotPath) {
+                   try {
+                     const { InputFile } = await import("grammy");
+                     await ctx.api.sendPhoto(chatId, new InputFile(result.screenshotPath), { caption: `${phone} dagi xato` });
+                   } catch (err) {
+                     logger.warn({ err }, "Could not send failure screenshot in batch mode");
+                   }
+                }
                 break;
 
               } catch (err: any) {
