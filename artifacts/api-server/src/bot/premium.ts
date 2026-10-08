@@ -1812,7 +1812,8 @@ export async function payPremiumViaWebApp(
     const cardInputGone = !(await page.locator('input[autocomplete="cc-number"]').isVisible({ timeout: 500 }).catch(() => false));
     if (cardInputGone) {
       logger.info("Card input gone after submit — form processed (no explicit credentials captured)");
-      return { submitted: true, proxyIpId };
+      const screenshotPath = await saveFailureScreenshot(page, debugLabel);
+      return { submitted: false, errorDetail: "Karta yuborildi, lekin to'lov tizimidan javob (token) olinmadi", screenshotPath };
     }
 
     // Check for error text
@@ -1828,9 +1829,10 @@ export async function payPremiumViaWebApp(
       }
     }
 
-    // Ambiguous — allow SendPaymentForm attempt
-    logger.warn("Could not capture credentials — will try SendPaymentForm without explicit token");
-    return { submitted: true, proxyIpId };
+    // Ambiguous — prevent SendPaymentForm attempt without explicit token
+    logger.warn("Could not capture credentials — stopping before SendPaymentForm to avoid blind failures");
+    const screenshotPath = await saveFailureScreenshot(page, debugLabel);
+    return { submitted: false, errorDetail: "Sahifadan token (credentials) olinmadi yoki sahifa qotib qoldi", screenshotPath };
     }
     throw new Error("Max retries exceeded");
   } catch (err: any) {
