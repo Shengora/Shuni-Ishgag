@@ -467,6 +467,8 @@ export interface PremiumFlowResult {
    * different saved card instead of just marking the target failed.
    */
   paymentDeclined?: boolean;
+  /** Path to the error screenshot if one was taken */
+  errorImagePath?: string;
 }
 
 // ── Centralized selector config ───────────────────────────────────────────────
@@ -518,6 +520,7 @@ const SELECTORS = {
   ],
   /** Card holder name inputs */
   holder: [
+    'input[name="paymentDetails.customer.fullName"]', // Smart Glocal 2nd step
     'input[autocomplete="cc-name"]',
     'input[name="cardholder"]',
     'input[name="holder"]',
@@ -525,6 +528,7 @@ const SELECTORS = {
     'input[placeholder*="holder"]',
     'input[placeholder*="name"]',
     'input[placeholder*="ism"]',
+    'input[placeholder*="Full name"]',
     'input[data-field="holder"]',
   ],
   /** Stripe iframe selectors */
@@ -593,16 +597,18 @@ function waitForBotMsg(
   });
 }
 
-/** Save a Playwright screenshot to /tmp for diagnosis */
-async function saveFailureScreenshot(page: any, label: string): Promise<void> {
+/** Save a Playwright screenshot to /tmp for diagnosis and returns the path */
+async function saveFailureScreenshot(page: any, label: string): Promise<string | undefined> {
   try {
     const ts = Date.now();
     const filePath = join(tmpdir(), `premium-fail-${label}-${ts}.png`);
     const screenshotBuf: Buffer = await page.screenshot({ fullPage: true });
     await writeFile(filePath, screenshotBuf);
     logger.warn({ screenshotPath: filePath }, "Saved failure screenshot");
+    return filePath;
   } catch (err) {
     logger.warn({ err }, "Could not save failure screenshot");
+    return undefined;
   }
 }
 
@@ -904,6 +910,8 @@ export interface PlaywrightCardResult {
   cardBlocked?: boolean;
   /** Detailed technical error message if submitted is false and card is not blocked */
   errorDetail?: string;
+  /** Path to the error screenshot if one was taken */
+  errorImagePath?: string;
 }
 
 /**
@@ -1708,9 +1716,43 @@ export async function payPremiumViaWebApp(
         return { submitted: false, cardBlocked: true };
       }
       logger.warn("Could not find any submit button");
-      await saveFailureScreenshot(page, debugLabel);
-      return { submitted: false, errorDetail: "Sahifada to'lov tugmasi (Pay/Submit) topilmadi" };
+      const errPath = await saveFailureScreenshot(page, debugLabel);
+      return { submitted: false, errorDetail: "Sahifada to'lov tugmasi (Pay/Submit) topilmadi", errorImagePath: errPath };
     }
+
+    // ── Handle Smart Glocal 2nd Step ("Full Name") if it appears ──────────────
+    // Sometimes, after the initial form, Smart Glocal shows a second step asking
+    // for the "Full name". We wait up to a few seconds to see if this field appears.
+    try {
+      const fullNameInput = page.locator('input[name="paymentDetails.customer.fullName"]').first();
+      if (await fullNameInput.isVisible({ timeout: 5000 }).catch(() => false)) {
+        logger.info("Smart Glocal 2nd step (Full Name) appeared");
+        await humanFill(fullNameInput, card.cardHolder);
+        logger.info("Filled Full Name field in 2nd step");
+
+        // Click the "Done" (or similar) button in the 2nd step
+        let doneClicked = false;
+        for (const sel of SELECTORS.payButton) {
+          const btn = page.locator(sel).first();
+          if (await btn.isVisible({ timeout: 1500 }).catch(() => false)) {
+            await btn.click({ timeout: 5000 });
+            doneClicked = true;
+            logger.info({ sel }, "Clicked submit/done button on 2nd step");
+            break;
+          }
+        }
+
+        if (!doneClicked) {
+           const lastBtn = page.locator("button").last();
+           if (await lastBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+             await lastBtn.click({ timeout: 5000 });
+             logger.info("Clicked last button as fallback on 2nd step");
+           }
+        }
+        // Give it time to process
+        await page.waitForTimeout(2000);
+      }
+    } catch (_) {}
 
     // ── Handle 3DS OTP if the bank requires it ────────────────────────────────
     // After clicking pay, some banks redirect to a 3DS page asking for an SMS
@@ -1798,8 +1840,11 @@ export async function payPremiumViaWebApp(
       logger.error({ err }, "payPremiumViaWebApp error");
       // Screenshot only while the browser is still alive — after a watchdog kill
       // the page is gone and page.screenshot() would itself hang.
-      if (page) await saveFailureScreenshot(page, debugLabel).catch(() => {});
-      return { submitted: false, errorDetail: errorMsg };
+      let errPath;
+      if (page) {
+        errPath = await saveFailureScreenshot(page, debugLabel).catch(() => undefined);
+      }
+      return { submitted: false, errorDetail: errorMsg, errorImagePath: errPath };
     }
   } finally {
     // Cancel the watchdog first so it doesn't fire again after we've cleaned up.
@@ -2704,8 +2749,9 @@ export async function runFullPremiumFlow(
         hasPremium: false,
         message: playwrightResult.cardBlocked
           ? "Karta anti-fraud tomonidan bloklandi (to'lov sahifasida xato ko'rsatildi)"
-          : `Karta formasi to'ldirishda xato${techError} — /tmp/premium-fail-*.png ga screenshot saqlandi`,
+          : `Karta formasi to'ldirishda xato${techError} — skrinshot biriktirildi.`,
         paymentDeclined: playwrightResult.cardBlocked,
+        errorImagePath: playwrightResult.errorImagePath,
       };
     }
 
@@ -2748,7 +2794,7 @@ export async function runFullPremiumFlow(
       hasPremium: false,
       message: isPaymentDeclined
         ? "Bank kartani rad etdi (PAYMENT_FAILED) — boshqa karta sinab ko'ring"
-        : "payments.SendPaymentForm xatosi — to'lov o'tmadi",
+        : `payments.SendPaymentForm xatosi (${payResult.errorCode || 'Nomaʼlum'}) — to'lov o'tmadi`,
       paymentDeclined: isPaymentDeclined,
     };
   }
