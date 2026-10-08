@@ -17,11 +17,11 @@ export function registerCardsHandlers(bot: Bot): void {
 
   const ADDCARD_USAGE =
     `${E.CARD} <b>Karta qo'shish</b>\n\n` +
-    `Format:\n<code>/addcard BANK_NOMI KARTA_RAQAMI MM/YY CVV</code>\n\n` +
+    `Format:\n<code>/addcard BANK_NOMI KARTA_RAQAMI MM/YY CVV ISMI_SHARIFI</code>\n\n` +
     `Misollar:\n` +
-    `<code>/addcard Kapital 4111111111111111 12/26 123</code>\n` +
-    `<code>/addcard Uzcard 8600123456781234 03/28 456</code>\n` +
-    `<code>/addcard Humo 9860123456781234 07/27 789</code>`;
+    `<code>/addcard Kapital 4111111111111111 12/26 123 Aliyev Vali</code>\n` +
+    `<code>/addcard Uzcard 8600123456781234 03/28 456 Aliyev Vali</code>\n` +
+    `<code>/addcard Humo 9860123456781234 07/27 789 Aliyev Vali</code>`;
 
   // ── /addcard ──────────────────────────────────────────────────────────────
   bot.command("addcard", async (ctx) => {
@@ -30,22 +30,23 @@ export function registerCardsHandlers(bot: Bot): void {
 
     const raw = ctx.match?.trim() || "";
 
-    // We expect 4 logical parts. However, since the user might enter spaces in the card number
-    // e.g. "BankName 1234 5678 1234 5678 12/26 123", we should process it gracefully.
-    // The last two parts are always Expiry and CVV.
-    const parts = raw.split(/\s+/);
-    if (parts.length < 4) {
+    // We expect 5 logical parts. However, since the user might enter spaces in the card number or the name
+    // e.g. "BankName 1234 5678 1234 5678 12/26 123 Aliyev Vali", we should process it gracefully.
+    // CVV and Expiry are expected right before the name, but detecting the name can be tricky if we just count parts.
+    // Let's use a regex to extract the parts precisely: Bank, Card, Expiry, CVV, and Name.
+    const regex = /^(\S+)\s+([\d\s]{13,25})\s+(\d{1,2}\/\d{2,4})\s+(\d{3,4})\s+(.+)$/;
+    const match = raw.match(regex);
+
+    if (!match) {
       await ctx.reply(ADDCARD_USAGE, { parse_mode: "HTML" });
       return;
     }
 
-    const bankName   = parts[0];
-    const cvv        = parts[parts.length - 1];
-    const expiryRaw  = parts[parts.length - 2];
-
-    // The card number could be everything between the bankName and expiryRaw
-    const cardParts = parts.slice(1, parts.length - 2);
-    const cardNumber = cardParts.join("").replace(/\D/g, "");
+    const bankName = match[1];
+    const cardNumber = match[2].replace(/\D/g, "");
+    const expiryRaw = match[3];
+    const cvv = match[4];
+    const cardHolderName = match[5].trim();
 
     // Normalise to MM/YY canonical format (premium.ts expects "MM/YY" for split("/"))
     const expiryDigits = expiryRaw.replace(/\D/g, "");
@@ -87,7 +88,7 @@ export function registerCardsHandlers(bot: Bot): void {
 
     await db.insert(savedCards).values({
       userId,
-      cardHolder: bankName, // used for Stripe cardholder name
+      cardHolder: cardHolderName,
       bankName,
       cardNumber,
       cardNumberMasked,
@@ -104,6 +105,7 @@ export function registerCardsHandlers(bot: Bot): void {
       `🏦 Bank: <b>${bankName}</b>\n` +
       `💳 Raqam: <code>${maskedFull}</code>\n` +
       `📅 Muddat: ${expiry}\n` +
+      `👤 Karta egasi: <b>${cardHolderName}</b>\n` +
       (isDefault ? `\n${E.STAR} Asosiy karta sifatida belgilandi` : ""),
       { parse_mode: "HTML", reply_markup: menuButton() },
     );

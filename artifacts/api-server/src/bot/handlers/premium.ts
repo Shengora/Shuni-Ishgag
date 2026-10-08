@@ -5,7 +5,7 @@
  * + step6_euro / step6_done / step6_abort (3DS resolution)
  * + card_retry / card_retry_cancel (payment-failed card swap)
  */
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, InputFile } from "grammy";
 import { db } from "@workspace/db";
 import { userbotSessions, savedCards, cardUsages, pendingNumbers } from "@workspace/db";
 import { eq, and, desc, gte } from "drizzle-orm";
@@ -942,6 +942,12 @@ export function registerPremiumHandlers(bot: Bot): void {
 
                 failed++;
                 lines[step - 1] = `${step}. ❌ <code>${phone}</code> — ${result.message}`;
+                if (result.errorImagePath) {
+                  await ctx.api.sendPhoto(ctx.chat!.id, new InputFile(result.errorImagePath), {
+                    caption: `❌ <b>Karta xatosi (${phone})</b>\n\nSkrinshot saqlandi.`,
+                    parse_mode: "HTML"
+                  }).catch(() => {});
+                }
                 break;
 
               } catch (err: any) {
