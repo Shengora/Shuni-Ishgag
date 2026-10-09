@@ -1715,6 +1715,24 @@ export async function payPremiumViaWebApp(
           }
         } catch (_) {}
       }
+
+      // Universal unconditional fallback: Find the single empty input and fill it
+      // Since card/exp/cvv are already filled, the only remaining empty input is Full Name
+      try {
+        const allInputs = await page.locator('input[type="text"], input:not([type])').all();
+        for (const input of allInputs) {
+          if (await input.isVisible({ timeout: 500 }).catch(() => false)) {
+            const val = await input.inputValue().catch(() => "");
+            if (!val || val.trim() === "") {
+              logger.info("Found empty input via fallback for Phase 2, assuming Full Name");
+              await humanFill(input, card.cardHolder);
+              fullNameHandled = true;
+              return true;
+            }
+          }
+        }
+      } catch (_) {}
+
       return false;
     };
 
