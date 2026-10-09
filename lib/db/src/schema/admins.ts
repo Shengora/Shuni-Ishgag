@@ -20,6 +20,7 @@ export const admins = pgTable("admins", {
   addedBySuperAdminId: bigint("added_by_super_admin_id", { mode: "number" }), // null = env seeded
   createdAt: timestamp("created_at").defaultNow().notNull(),
   blockedAt: timestamp("blocked_at"),
+  verificationMode: text("verification_mode").notNull().default("manual"),
 });
 
 // Statistics periods — each "restart" closes the current period and opens a new one.

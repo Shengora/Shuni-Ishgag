@@ -184,7 +184,23 @@ export function createBot() {
   bot.callbackQuery("menu_status", async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
     const text = await buildOperatorStatusText(ctx.from.id);
-    await ctx.reply(text, { parse_mode: "HTML", reply_markup: menuButton() });
+    const { statusMenuKeyboard } = await import("./handlers/shared.js");
+    const kb = await statusMenuKeyboard(ctx.from.id);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  });
+
+  bot.callbackQuery(/^toggle_vmode:(manual|auto)$/, async (ctx) => {
+    const mode = ctx.match[1];
+    await db.update(admins)
+      .set({ verificationMode: mode } as any)
+      .where(eq(admins.telegramUserId, ctx.from.id));
+
+    await ctx.answerCallbackQuery({ text: `3DS rejimi ${mode === 'auto' ? 'Avto' : "Qo'lda"} qilib o'zgartirildi` }).catch(() => {});
+
+    const text = await buildOperatorStatusText(ctx.from.id);
+    const { statusMenuKeyboard } = await import("./handlers/shared.js");
+    const kb = await statusMenuKeyboard(ctx.from.id);
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
   });
 
   // ── Register all feature handler modules ──────────────────────────────────
