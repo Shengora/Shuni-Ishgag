@@ -1530,6 +1530,12 @@ export async function payPremiumViaWebApp(
         () => (globalThis as any).document.body?.innerText ?? ""
       ).catch(() => "");
       const lower = text.toLowerCase();
+
+      // Specifically ignore "check required fields" which is just a Phase 2 prompt, not a card decline.
+      if (lower.includes("check required fields")) {
+        return { isError: false, snippet: text.slice(0, 200) };
+      }
+
       const isError = ERROR_KEYWORDS.some((kw) => lower.includes(kw));
       return { isError, snippet: text.slice(0, 200) };
     };
@@ -1690,19 +1696,49 @@ export async function payPremiumViaWebApp(
       }
     }
 
+    // ── Pre-check for Phase 2 (Customer Info / Full name) ─────────────────────
+    // Sometimes Smart Glocal shows "Full name" immediately on the same page and
+    // marks it as a "Check required fields" error if we try to click Pay without
+    // filling it. By checking for it BEFORE we look for errors, we bypass the error
+    // check and handle it gracefully.
+    let fullNameHandled = false;
+    const handlePhase2 = async () => {
+      if (fullNameHandled) return false;
+      for (const sel of SELECTORS.holder) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 500 }).catch(() => false)) {
+            logger.info({ sel }, "Found Full name field (Phase 2), filling it");
+            await humanFill(el, card.cardHolder);
+            fullNameHandled = true;
+            return true;
+          }
+        } catch (_) {}
+      }
+      return false;
+    };
+
+    // Attempt Phase 2 filling early in case it's on the same screen initially
+    await handlePhase2();
+
     // ── Click Pay/Submit button ───────────────────────────────────────────────
     let clicked = false;
-    for (const sel of SELECTORS.payButton) {
-      try {
-        const el = page.locator(sel).first();
-        if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-          await el.click({ timeout: 5000 });
-          clicked = true;
-          logger.info({ sel }, "Clicked pay button");
-          break;
-        }
-      } catch (_) {}
-    }
+    const clickPay = async () => {
+      for (const sel of SELECTORS.payButton) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
+            await el.click({ timeout: 5000 });
+            clicked = true;
+            logger.info({ sel }, "Clicked pay button");
+            return true;
+          }
+        } catch (_) {}
+      }
+      return false;
+    };
+
+    await clickPay();
 
     if (!clicked) {
       logger.warn("No pay button matched — trying last visible button");
@@ -1725,22 +1761,12 @@ export async function payPremiumViaWebApp(
       return { submitted: false, errorDetail: "Sahifada to'lov tugmasi (Pay/Submit) topilmadi", screenshotPath };
     }
 
-    // ── Handle Phase 2: "Customer Info" / "Full name" ─────────────────────────
-    // Sometimes after clicking Pay, it asks for Full Name. We check if such a field appears.
-    logger.info("Checking if a 'Full name' field appears (Phase 2 of payment form)");
-    await page.waitForTimeout(1000); // Wait for potential SPA transition
-
-    let fullNameHandled = false;
-    for (const sel of SELECTORS.holder) {
-      try {
-        const el = page.locator(sel).first();
-        if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-          logger.info({ sel }, "Found Full name field (Phase 2), filling it");
-          await humanFill(el, card.cardHolder);
-          fullNameHandled = true;
-          break;
-        }
-      } catch (_) {}
+    // ── Handle Phase 2: "Customer Info" / "Full name" (Post-Pay) ──────────────
+    // If it wasn't there initially, maybe it appeared after clicking Pay (SPA transition).
+    if (!fullNameHandled) {
+      logger.info("Checking if a 'Full name' field appears after click (Phase 2)");
+      await page.waitForTimeout(1000);
+      await handlePhase2();
     }
 
     if (fullNameHandled) {
