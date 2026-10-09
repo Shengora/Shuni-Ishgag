@@ -7,7 +7,7 @@
  */
 import { Bot, InlineKeyboard } from "grammy";
 import { db } from "@workspace/db";
-import { userbotSessions, savedCards, cardUsages, pendingNumbers } from "@workspace/db";
+import { userbotSessions, savedCards, cardUsages, pendingNumbers, admins } from "@workspace/db";
 import { eq, and, desc, gte } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
 import { E, EID } from "../../lib/emoji.js";
@@ -201,6 +201,9 @@ export function registerPremiumHandlers(bot: Bot): void {
             const checkProviderBot = pendingRow?.providerBot ?? verifierBot;
             const checkMsgId = pendingRow?.repreamMessageId ? Number(pendingRow.repreamMessageId) : undefined;
 
+            const [adminRow] = await db.select().from(admins).where(eq(admins.telegramUserId, operatorId)).limit(1);
+            const isAuto = (adminRow as any)?.verificationMode === "auto";
+
             const result = await withTimeout(runFullPremiumFlow(
               userClient,
               PREMIUM_BOT,
@@ -208,7 +211,7 @@ export function registerPremiumHandlers(bot: Bot): void {
               card,
               async (progressMsg) => { await update(`⏳ <b><code>${phone}</code></b>\n\n${progressMsg}`); },
               // OTP callback
-              async () => {
+              isAuto ? async () => {
                 return new Promise<string | null>((resolve) => {
                   const otpTimer = setTimeout(() => {
                     pendingOtpCallbacks.delete(attemptId);
@@ -233,9 +236,9 @@ export function registerPremiumHandlers(bot: Bot): void {
                     { parse_mode: "HTML" },
                   ).catch(() => {});
                 });
-              },
+              } : undefined,
               // Step6 / bank 3DS callback
-              async (verificationUrl: string) => {
+              !isAuto ? async (verificationUrl: string) => {
                 step6Promise = new Promise<void>((resolve, reject) => {
                   pendingStep6Callbacks.set(attemptId, (choice) => {
                     pendingStep6Callbacks.delete(attemptId);
@@ -285,7 +288,7 @@ export function registerPremiumHandlers(bot: Bot): void {
                     cb("step6_timeout");
                   }
                 })();
-              },
+              } : undefined,
               checkMsgId,
               async () => { if (!step6Promise) return; await step6Promise; },
               await getMasterClient(operatorId) ?? undefined,
@@ -768,6 +771,9 @@ export function registerPremiumHandlers(bot: Bot): void {
                 const checkProviderBot = pendingRow?.providerBot ?? verifierBot;
                 const checkMsgId = pendingRow?.repreamMessageId ? Number(pendingRow.repreamMessageId) : undefined;
 
+                const [adminRow] = await db.select().from(admins).where(eq(admins.telegramUserId, operatorId)).limit(1);
+                const isAuto = (adminRow as any)?.verificationMode === "auto";
+
                 const result = await withTimeout(runFullPremiumFlow(
                   userClient,
                   PREMIUM_BOT,
@@ -778,7 +784,7 @@ export function registerPremiumHandlers(bot: Bot): void {
                     await updateProgress();
                   },
                   // OTP callback
-                  async () => {
+                  isAuto ? async () => {
                     return new Promise<string | null>((resolve) => {
                       const otpTimer = setTimeout(() => {
                         pendingOtpCallbacks.delete(attemptId);
@@ -803,9 +809,9 @@ export function registerPremiumHandlers(bot: Bot): void {
                         `🔐 <b>${step}/${targets.length}: <code>${phone}</code> — 3DS kod kerak!</b>\n\n📱 Kartangiz raqamiga SMS kod yuborildi.\n\nKodni shu yerga yuboring (120 soniya):\n<i>Misol: 123456</i>`,
                       ).catch(() => {});
                     });
-                  },
+                  } : undefined,
                   // Step6 / bank 3DS callback
-                  async (verificationUrl: string) => {
+                  !isAuto ? async (verificationUrl: string) => {
                     step6Promise = new Promise<void>((resolve, reject) => {
                       pendingStep6Callbacks.set(attemptId, (choice) => {
                         pendingStep6Callbacks.delete(attemptId);
@@ -855,7 +861,7 @@ export function registerPremiumHandlers(bot: Bot): void {
                         cb("step6_timeout");
                       }
                     })();
-                  },
+                  } : undefined,
                   checkMsgId,
                   async () => { if (!step6Promise) return; await step6Promise; },
                   await getMasterClient(operatorId) ?? undefined,

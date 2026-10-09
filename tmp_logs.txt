@@ -1,0 +1,1 @@
+[TAILING] Tailing last 10 lines for [api-server] process (change the value with --lines option)

@@ -1,0 +1,60 @@
+
+                        -------------
+
+__/\\\\\\\\\\\\\____/\\\\____________/\\\\____/\\\\\\\\\_____
+ _\/\\\/////////\\\_\/\\\\\\________/\\\\\\__/\\\///////\\\___
+  _\/\\\_______\/\\\_\/\\\//\\\____/\\\//\\\_\///______\//\\\__
+   _\/\\\\\\\\\\\\\/__\/\\\\///\\\/\\\/_\/\\\___________/\\\/___
+    _\/\\\/////////____\/\\\__\///\\\/___\/\\\________/\\\//_____
+     _\/\\\_____________\/\\\____\///_____\/\\\_____/\\\//________
+      _\/\\\_____________\/\\\_____________\/\\\___/\\\/___________
+       _\/\\\_____________\/\\\_____________\/\\\__/\\\\\\\\\\\\\\\_
+        _\///______________\///______________\///__\///////////////__
+
+
+                          Runtime Edition
+
+        PM2 is a Production Process Manager for Node.js applications
+                     with a built-in Load Balancer.
+
+                Start and Daemonize any application:
+                $ pm2 start app.js
+
+                Load Balance 4 instances of api.js:
+                $ pm2 start api.js -i 4
+
+                Monitor in production:
+                $ pm2 monitor
+
+                Make pm2 auto-boot at server restart:
+                $ pm2 startup
+
+                To go further checkout:
+                http://pm2.io/
+
+
+                        -------------
+
+[PM2] Spawning PM2 daemon with pm2_home=/home/jules/.pm2
+[PM2] This PM2 is not UP TO DATE
+[PM2] Upgrade to version 7.0.4
+[PM2] PM2 Successfully daemonized
+[TAILING] Tailing last 20 lines for [all] processes (change the value with --lines option)
+/home/jules/.pm2/pm2.log last 20 lines:
+PM2        | 2026-10-09T05:46:03: PM2 log: ===============================================================================
+PM2        | 2026-10-09T05:46:03: PM2 log: --- New PM2 Daemon started ----------------------------------------------------
+PM2        | 2026-10-09T05:46:03: PM2 log: Time                 : Fri Oct 09 2026 05:46:03 GMT+0000 (Coordinated Universal Time)
+PM2        | 2026-10-09T05:46:03: PM2 log: PM2 version          : 6.0.14
+PM2        | 2026-10-09T05:46:03: PM2 log: Node.js version      : 22.22.1
+PM2        | 2026-10-09T05:46:03: PM2 log: Current arch         : x64
+PM2        | 2026-10-09T05:46:03: PM2 log: PM2 home             : /home/jules/.pm2
+PM2        | 2026-10-09T05:46:03: PM2 log: PM2 PID file         : /home/jules/.pm2/pm2.pid
+PM2        | 2026-10-09T05:46:03: PM2 log: RPC socket file      : /home/jules/.pm2/rpc.sock
+PM2        | 2026-10-09T05:46:03: PM2 log: BUS socket file      : /home/jules/.pm2/pub.sock
+PM2        | 2026-10-09T05:46:03: PM2 log: Application log path : /home/jules/.pm2/logs
+PM2        | 2026-10-09T05:46:03: PM2 log: Worker Interval      : 30000
+PM2        | 2026-10-09T05:46:03: PM2 log: Process dump file    : /home/jules/.pm2/dump.pm2
+PM2        | 2026-10-09T05:46:03: PM2 log: Concurrent actions   : 2
+PM2        | 2026-10-09T05:46:03: PM2 log: SIGTERM timeout      : 1600
+PM2        | 2026-10-09T05:46:03: PM2 log: Runtime Binary       : /home/jules/.nvm/versions/node/v22.22.1/bin/node
+PM2        | 2026-10-09T05:46:03: PM2 log: ===============================================================================

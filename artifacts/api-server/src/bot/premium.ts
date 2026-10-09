@@ -1530,6 +1530,12 @@ export async function payPremiumViaWebApp(
         () => (globalThis as any).document.body?.innerText ?? ""
       ).catch(() => "");
       const lower = text.toLowerCase();
+
+      // Specifically ignore "check required fields" which is just a Phase 2 prompt, not a card decline.
+      if (lower.includes("check required fields")) {
+        return { isError: false, snippet: text.slice(0, 200) };
+      }
+
       const isError = ERROR_KEYWORDS.some((kw) => lower.includes(kw));
       return { isError, snippet: text.slice(0, 200) };
     };
@@ -1690,19 +1696,67 @@ export async function payPremiumViaWebApp(
       }
     }
 
-    // ── Click Pay/Submit button ───────────────────────────────────────────────
-    let clicked = false;
-    for (const sel of SELECTORS.payButton) {
+    // ── Pre-check for Phase 2 (Customer Info / Full name) ─────────────────────
+    // Sometimes Smart Glocal shows "Full name" immediately on the same page and
+    // marks it as a "Check required fields" error if we try to click Pay without
+    // filling it. By checking for it BEFORE we look for errors, we bypass the error
+    // check and handle it gracefully.
+    let fullNameHandled = false;
+    const handlePhase2 = async () => {
+      if (fullNameHandled) return false;
+      for (const sel of SELECTORS.holder) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 500 }).catch(() => false)) {
+            logger.info({ sel }, "Found Full name field (Phase 2), filling it");
+            await humanFill(el, card.cardHolder);
+            fullNameHandled = true;
+            return true;
+          }
+        } catch (_) {}
+      }
+
+      // Universal unconditional fallback: Find the single empty input and fill it
+      // Since card/exp/cvv are already filled, the only remaining empty input is Full Name
       try {
-        const el = page.locator(sel).first();
-        if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-          await el.click({ timeout: 5000 });
-          clicked = true;
-          logger.info({ sel }, "Clicked pay button");
-          break;
+        const allInputs = await page.locator('input[type="text"], input:not([type])').all();
+        for (const input of allInputs) {
+          if (await input.isVisible({ timeout: 500 }).catch(() => false)) {
+            const val = await input.inputValue().catch(() => "");
+            if (!val || val.trim() === "") {
+              logger.info("Found empty input via fallback for Phase 2, assuming Full Name");
+              await humanFill(input, card.cardHolder);
+              fullNameHandled = true;
+              return true;
+            }
+          }
         }
       } catch (_) {}
-    }
+
+      return false;
+    };
+
+    // Attempt Phase 2 filling early in case it's on the same screen initially
+    await handlePhase2();
+
+    // ── Click Pay/Submit button ───────────────────────────────────────────────
+    let clicked = false;
+    const clickPay = async () => {
+      for (const sel of SELECTORS.payButton) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
+            await el.click({ timeout: 5000 });
+            clicked = true;
+            logger.info({ sel }, "Clicked pay button");
+            return true;
+          }
+        } catch (_) {}
+      }
+      return false;
+    };
+
+    await clickPay();
 
     if (!clicked) {
       logger.warn("No pay button matched — trying last visible button");
@@ -1725,34 +1779,44 @@ export async function payPremiumViaWebApp(
       return { submitted: false, errorDetail: "Sahifada to'lov tugmasi (Pay/Submit) topilmadi", screenshotPath };
     }
 
-    // ── Handle Phase 2: "Customer Info" / "Full name" ─────────────────────────
-    // Sometimes after clicking Pay, it asks for Full Name. We check if such a field appears.
-    logger.info("Checking if a 'Full name' field appears (Phase 2 of payment form)");
-    await page.waitForTimeout(1000); // Wait for potential SPA transition
-
-    let fullNameHandled = false;
-    try {
-      const allHolderSelectors = SELECTORS.holder.join(", ");
-      const nameInput = page.locator(allHolderSelectors).first();
-      // Wait once for any of the selectors to become visible (fast failure if not present)
-      await nameInput.waitFor({ state: "visible", timeout: 2000 });
-
-      logger.info("Found Full name field (Phase 2), filling it");
-      await humanFill(nameInput, card.cardHolder);
-      fullNameHandled = true;
-    } catch (_) {
-      // Field never appeared, which is fine (Phase 2 is optional)
+    // ── Handle Phase 2: "Customer Info" / "Full name" (Post-Pay) ──────────────
+    // If it wasn't there initially, maybe it appeared after clicking Pay (SPA transition).
+    if (!fullNameHandled) {
+      logger.info("Checking if a 'Full name' field appears after click (Phase 2)");
+      await page.waitForTimeout(1000);
+      await handlePhase2();
     }
 
     if (fullNameHandled) {
       logger.info("Clicking Done / Submit button for Phase 2");
-      try {
-         const allBtnSelectors = SELECTORS.payButton.join(", ");
-         const submitBtn = page.locator(allBtnSelectors).first();
-         await submitBtn.waitFor({ state: "visible", timeout: 2000 });
-         await submitBtn.click({ timeout: 5000 });
-         logger.info("Clicked pay/done button for Phase 2");
-      } catch (_) {
+      await page.waitForTimeout(500); // Short delay to let the UI register the input
+
+      let phase2Clicked = false;
+      for (const sel of SELECTORS.payButton) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
+            await el.click({ timeout: 5000 });
+            phase2Clicked = true;
+            logger.info({ sel }, "Clicked pay/done button for Phase 2");
+            break;
+          }
+        } catch (_) {}
+      }
+
+      if (!phase2Clicked) {
+        // Look for the generic "Done" button specifically seen in Phase 2
+        try {
+          const doneBtn = page.getByText("Done", { exact: true }).first();
+          if (await doneBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+             await doneBtn.click({ timeout: 5000 });
+             phase2Clicked = true;
+             logger.info("Clicked literal 'Done' button for Phase 2");
+          }
+        } catch (_) {}
+      }
+
+      if (!phase2Clicked) {
          logger.warn("Could not find submit button for Phase 2, skipping fallback to prevent clicking Cancel");
       }
     }
@@ -1812,7 +1876,8 @@ export async function payPremiumViaWebApp(
     const cardInputGone = !(await page.locator('input[autocomplete="cc-number"]').isVisible({ timeout: 500 }).catch(() => false));
     if (cardInputGone) {
       logger.info("Card input gone after submit — form processed (no explicit credentials captured)");
-      return { submitted: true, proxyIpId };
+      const screenshotPath = await saveFailureScreenshot(page, debugLabel);
+      return { submitted: false, errorDetail: "Karta yuborildi, lekin to'lov tizimidan javob (token) olinmadi", screenshotPath };
     }
 
     // Check for error text
@@ -1828,9 +1893,10 @@ export async function payPremiumViaWebApp(
       }
     }
 
-    // Ambiguous — allow SendPaymentForm attempt
-    logger.warn("Could not capture credentials — will try SendPaymentForm without explicit token");
-    return { submitted: true, proxyIpId };
+    // Ambiguous — prevent SendPaymentForm attempt without explicit token
+    logger.warn("Could not capture credentials — stopping before SendPaymentForm to avoid blind failures");
+    const screenshotPath = await saveFailureScreenshot(page, debugLabel);
+    return { submitted: false, errorDetail: "Sahifadan token (credentials) olinmadi yoki sahifa qotib qoldi", screenshotPath };
     }
     throw new Error("Max retries exceeded");
   } catch (err: any) {

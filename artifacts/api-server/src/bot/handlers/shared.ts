@@ -371,6 +371,9 @@ export async function buildOperatorStatusText(operatorId: number): Promise<strin
   const premium = sessions.filter((s) => s.hasPremium).length;
   const myStats = await getAdminStats(operatorId, period.id);
 
+  const [adminRow] = await db.select().from(admins).where(eq(admins.telegramUserId, operatorId)).limit(1);
+  const vMode = (adminRow as any)?.verificationMode === "auto" ? "Avto" : "Qo'lda";
+
   let slotLabel: string;
   if (masterRows.length) {
     slotLabel = masterRows.map((r) =>
@@ -393,7 +396,8 @@ export async function buildOperatorStatusText(operatorId: number): Promise<strin
     `${E.STATS} <b>Holat</b>\n\n` +
     `Operator: ${client ? `${E.OK} Ulangan (${slotLabel})` : `${E.NO} Ulanmagan`}\n` +
     `Userbot sessiyalar: <b>${sessions.length}</b> ta (${active} faol)\n` +
-    `${E.STAR} Premium sessiyalar: <b>${premium}</b> ta\n\n` +
+    `${E.STAR} Premium sessiyalar: <b>${premium}</b> ta\n` +
+    `🔐 3DS Rejimi: <b>${vMode}</b>\n\n` +
     `<b>${E.STATS} Statistika (Davr #${period.id}):</b>\n` +
     `${E.PHONE} Olingan raqamlar: <b>${myStats.numbersGotten}</b>\n` +
     `${E.OK} Yaratilgan sessiyalar: <b>${myStats.sessionsCreated}</b>\n` +
@@ -402,6 +406,18 @@ export async function buildOperatorStatusText(operatorId: number): Promise<strin
     `${E.CARD} Qo'shilgan kartalar: <b>${myStats.cardsAdded}</b>\n` +
     `${E.KEY} Loginlar: <b>${myStats.logins}</b>`
   );
+}
+
+export async function statusMenuKeyboard(operatorId: number): Promise<InlineKeyboard> {
+  const [adminRow] = await db.select().from(admins).where(eq(admins.telegramUserId, operatorId)).limit(1);
+  const isAuto = (adminRow as any)?.verificationMode === "auto";
+  const toggleTo = isAuto ? "manual" : "auto";
+  const btnText = isAuto ? "🔄 3DS: Qo'lda (Manual) rejimga o'tish" : "🔄 3DS: Avto rejimga o'tish";
+
+  return new InlineKeyboard()
+    .text(btnText, `toggle_vmode:${toggleTo}`)
+    .row()
+    .text("⬅️ Orqaga", "menu_home");
 }
 
 // ── Freeze & sign-in helpers ──────────────────────────────────────────────────
