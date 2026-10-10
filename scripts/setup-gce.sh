@@ -68,6 +68,7 @@ SUPER_ADMIN_ID=$ADMIN_VAL
 API_ID=$API_ID_VAL
 API_HASH=$API_HASH_VAL
 DATABASE_URL=$DB_VAL
+BASE_PATH=/
 EOF
     log ".env fayli muvaffaqiyatli yaratildi."
 fi
