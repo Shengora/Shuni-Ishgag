@@ -53,18 +53,194 @@ Javobingda xohlagancha oddiy matn orqali tushuntirish berishing mumkin. Ammo bir
 
 let chatHistory = [];
 
-async function callOpenAI(apiKey, messages) {
+async function fetchSources(apiKey) {
   return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'jules.googleapis.com',
+      port: 443,
+      path: '/v1alpha/sources',
+      method: 'GET',
+      headers: {
+        'X-Goog-Api-Key': apiKey,
+        'Content-Type': 'application/json'
+      }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (c) => data += c);
+      res.on('end', () => {
+        if (res.statusCode === 401) reject(new Error("401_UNAUTHORIZED"));
+        else if (res.statusCode >= 200 && res.statusCode < 300) {
+           resolve(JSON.parse(data));
+        } else reject(new Error(`Fetch Sources xatosi: ${res.statusCode}`));
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function createSession(apiKey, sourceName, prompt) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      prompt: prompt,
+      sourceContext: { source: sourceName }
+    });
+    const options = {
+      hostname: 'jules.googleapis.com',
+      port: 443,
+      path: '/v1alpha/sessions',
+      method: 'POST',
+      headers: {
+        'X-Goog-Api-Key': apiKey,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (c) => data += c);
+      res.on('end', () => {
+        if (res.statusCode === 401) reject(new Error("401_UNAUTHORIZED"));
+        else if (res.statusCode >= 200 && res.statusCode < 300) {
+           resolve(JSON.parse(data));
+        } else reject(new Error(`Create Session xatosi: ${res.statusCode}`));
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function getActivities(apiKey, sessionId) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'jules.googleapis.com',
+      port: 443,
+      path: `/v1alpha/${sessionId}/activities?pageSize=50`,
+      method: 'GET',
+      headers: {
+        'X-Goog-Api-Key': apiKey,
+        'Content-Type': 'application/json'
+      }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (c) => data += c);
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+           resolve(JSON.parse(data));
+        } else reject(new Error(`Get Activities xatosi: ${res.statusCode}`));
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function sendMessage(apiKey, sessionId, prompt) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ prompt: prompt });
+    const options = {
+      hostname: 'jules.googleapis.com',
+      port: 443,
+      path: `/v1alpha/${sessionId}:sendMessage`,
+      method: 'POST',
+      headers: {
+        'X-Goog-Api-Key': apiKey,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (c) => data += c);
+      res.on('end', () => {
+        if (res.statusCode === 401) reject(new Error("401_UNAUTHORIZED"));
+        else if (res.statusCode >= 200 && res.statusCode < 300) {
+           resolve();
+        } else reject(new Error(`Send Message xatosi: ${res.statusCode}`));
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function pollForAgentResponse(apiKey, sessionId, knownActivityIds = new Set()) {
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+    let foundNewTexts = [];
+    const interval = setInterval(async () => {
+      try {
+        attempts++;
+        const resp = await getActivities(apiKey, sessionId);
+        const activities = resp.activities || [];
+
+        let hasNewActivity = false;
+        let isCompleted = false;
+
+        for (const act of activities) {
+          if (!knownActivityIds.has(act.id)) {
+             knownActivityIds.add(act.id);
+             hasNewActivity = true;
+             if (act.originator === 'agent' && act.progressUpdated) {
+                let msg = act.progressUpdated.title || "";
+                if (act.progressUpdated.description) msg += "\n" + act.progressUpdated.description;
+                foundNewTexts.push(msg);
+             } else if (act.originator === 'agent' && act.sessionCompleted) {
+                foundNewTexts.push("Session completed by agent.");
+                isCompleted = true;
+             } else if (act.originator === 'agent' && act.planGenerated) {
+                const planSteps = act.planGenerated.plan.steps.map(s => s.title).join('\n');
+                foundNewTexts.push(`Plan generated:\n${planSteps}\n\`\`\`json\n{"action": "run_command", "command": "echo Plan approved"}\n\`\`\``);
+             } else if (act.originator === 'agent' && act.artifacts && act.artifacts.length > 0) {
+                 const bash = act.artifacts.find(a => a.bashOutput);
+                 if (bash) foundNewTexts.push(`Bash output: ${bash.bashOutput.output}`);
+             }
+          }
+        }
+
+        // Only resolve if session is completed OR we hit timeout,
+        // Otherwise keep polling to aggregate everything
+        if (isCompleted) {
+          clearInterval(interval);
+          resolve(foundNewTexts.join('\n\n'));
+        } else if (attempts > 60) {
+          clearInterval(interval);
+          if (foundNewTexts.length > 0) {
+             resolve(foundNewTexts.join('\n\n'));
+          } else {
+             resolve("Agent javob bermadi (timeout).");
+          }
+        } else if (hasNewActivity) {
+           // We got some activities, but session is not complete.
+           // Reset attempts so we can wait longer if needed
+           attempts = 0;
+        }
+      } catch (err) {
+         clearInterval(interval);
+         reject(err);
+      }
+    }, 2000);
+  });
+}
+
+async function callOpenAI(apiKey, messages, endpoint = 'https://api.openai.com/v1/chat/completions', model = 'gpt-4o') {
+  return new Promise((resolve, reject) => {
+    const url = new URL(endpoint);
     const data = JSON.stringify({
-      model: "gpt-4o", // O'zgartirishingiz mumkin, masalan: gpt-3.5-turbo yoki claude-3-5-sonnet (agar URLni o'zgartirsangiz)
+      model: model,
       messages: messages,
       temperature: 0.2
     });
 
     const options = {
-      hostname: 'api.openai.com',
-      port: 443,
-      path: '/v1/chat/completions',
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -73,7 +249,7 @@ async function callOpenAI(apiKey, messages) {
       }
     };
 
-    const req = https.request(options, (res) => {
+    const req = (url.protocol === 'http:' ? require('http') : https).request(options, (res) => {
       let responseData = '';
       res.on('data', (chunk) => { responseData += chunk; });
       res.on('end', () => {
@@ -84,6 +260,8 @@ async function callOpenAI(apiKey, messages) {
           } catch (e) {
             reject(new Error("JSON parsing error: " + e.message));
           }
+        } else if (res.statusCode === 401) {
+          reject(new Error("401_UNAUTHORIZED"));
         } else {
           reject(new Error(`API xatosi: ${res.statusCode} - ${responseData}`));
         }
@@ -95,6 +273,10 @@ async function callOpenAI(apiKey, messages) {
     req.end();
   });
 }
+
+// Global state for Jules integration
+let currentJulesSessionId = null;
+let knownActivityIds = new Set();
 
 function parseAction(aiResponse) {
   const jsonRegex = /\`\`\`json\n([\s\S]*?)\n\`\`\`/g;
@@ -175,38 +357,103 @@ async function executeAction(action) {
   return "Noma'lum harakat (action) kiritildi.";
 }
 
-async function getApiKey() {
+async function getApiKeyAndConfig() {
   let apiKey = '';
+  let endpoint = 'https://api.openai.com/v1/chat/completions';
+  let model = 'gpt-4o';
+
   if (fs.existsSync(envPath)) {
     const envContent = fs.readFileSync(envPath, 'utf8');
-    const match = envContent.match(/^AI_API_KEY=(.*)$/m);
-    if (match && match[1].trim()) {
-      apiKey = match[1].trim();
-    }
+
+    const keyMatch = envContent.match(/^AI_API_KEY=(.*)$/m);
+    if (keyMatch && keyMatch[1].trim()) apiKey = keyMatch[1].trim();
+
+    const endpointMatch = envContent.match(/^AI_API_ENDPOINT=(.*)$/m);
+    if (endpointMatch && endpointMatch[1].trim()) endpoint = endpointMatch[1].trim();
+
+    const modelMatch = envContent.match(/^AI_API_MODEL=(.*)$/m);
+    if (modelMatch && modelMatch[1].trim()) model = modelMatch[1].trim();
   }
 
-  if (!apiKey) {
-    console.log('\n[Jules Agent] AI API kaliti topilmadi (masalan, OpenAI API Key).');
+  while (!apiKey) {
+    console.log('\n[Jules Agent] AI API kaliti topilmadi.');
     apiKey = await question('Iltimos, API kalitingizni kiriting: ');
 
     if (!apiKey) {
-      console.log('API kaliti kiritilmadi. Dastur to\'xtatildi.');
-      process.exit(1);
-    }
-
-    const saveIt = await question('Ushbu kalitni kelajakda foydalanish uchun .env fayliga saqlab qo\'yaymi? (y/n): ');
-    if (saveIt.toLowerCase() === 'y') {
-      let currentEnv = '';
-      if (fs.existsSync(envPath)) {
-        currentEnv = fs.readFileSync(envPath, 'utf8');
-      }
-      const newEnv = currentEnv ? `${currentEnv}\nAI_API_KEY=${apiKey}\n` : `AI_API_KEY=${apiKey}\n`;
-      fs.writeFileSync(envPath, newEnv, 'utf8');
-      console.log('[Jules Agent] API kaliti .env fayliga muvaffaqiyatli saqlandi!\n');
+      console.log('API kaliti kiritilmadi. Qayta urinib ko\'ring.');
     }
   }
 
-  return apiKey;
+  // Auto-detect if it's a Jules API key
+  if (apiKey.startsWith('AQ.')) {
+     endpoint = 'https://jules.googleapis.com';
+     model = 'jules';
+  }
+
+  let currentEnv = '';
+  if (fs.existsSync(envPath)) {
+    currentEnv = fs.readFileSync(envPath, 'utf8');
+    // update or add keys
+    currentEnv = currentEnv.replace(/^AI_API_KEY=.*$/m, `AI_API_KEY=${apiKey}`);
+    if (!currentEnv.includes(`AI_API_KEY=${apiKey}`)) {
+      currentEnv += `\nAI_API_KEY=${apiKey}`;
+    }
+
+    currentEnv = currentEnv.replace(/^AI_API_ENDPOINT=.*$/m, `AI_API_ENDPOINT=${endpoint}`);
+    if (!currentEnv.includes(`AI_API_ENDPOINT=${endpoint}`)) {
+       currentEnv += `\nAI_API_ENDPOINT=${endpoint}`;
+    }
+
+    currentEnv = currentEnv.replace(/^AI_API_MODEL=.*$/m, `AI_API_MODEL=${model}`);
+    if (!currentEnv.includes(`AI_API_MODEL=${model}`)) {
+       currentEnv += `\nAI_API_MODEL=${model}`;
+    }
+  } else {
+    currentEnv = `AI_API_KEY=${apiKey}\nAI_API_ENDPOINT=${endpoint}\nAI_API_MODEL=${model}\n`;
+  }
+
+  fs.writeFileSync(envPath, currentEnv, 'utf8');
+  return { apiKey, endpoint, model };
+}
+
+async function initJulesSession(config) {
+   let retry = true;
+   while(retry) {
+      console.log('[Jules Agent] Jules API manbai aniqlanmoqda...');
+      try {
+        const sourcesResp = await fetchSources(config.apiKey);
+        if (sourcesResp.sources && sourcesResp.sources.length > 0) {
+           const sourceName = sourcesResp.sources[0].name;
+           console.log(`[Jules Agent] Manba topildi: ${sourceName}. Yangi sessiya yaratilmoqda...`);
+           const sessionResp = await createSession(config.apiKey, sourceName, SYSTEM_PROMPT);
+           currentJulesSessionId = sessionResp.name;
+           console.log(`[Jules Agent] Sessiya muvaffaqiyatli yaratildi: ${currentJulesSessionId}\n`);
+
+           const actResp = await getActivities(config.apiKey, currentJulesSessionId);
+           if (actResp.activities) {
+             actResp.activities.forEach(a => knownActivityIds.add(a.id));
+           }
+           retry = false;
+        } else {
+           console.log('[Jules Agent] Diqqat: Hech qanday source topilmadi. Avval Jules web panelidan Github ni ulang.');
+           process.exit(1);
+        }
+      } catch (err) {
+        if (err.message === "401_UNAUTHORIZED") {
+           console.error('\n[Xatolik] API kaliti yaroqsiz (401 Unauthorized). U .env faylidan o\'chirilmoqda.');
+           if (fs.existsSync(envPath)) {
+             let envContent = fs.readFileSync(envPath, 'utf8');
+             envContent = envContent.replace(/^AI_API_KEY=.*$/m, '');
+             fs.writeFileSync(envPath, envContent, 'utf8');
+           }
+           config = await getApiKeyAndConfig(); // Qayta so'rash
+        } else {
+           console.error('[Jules Agent] Sessiya yaratishda xatolik:', err.message);
+           process.exit(1);
+        }
+      }
+   }
+   return config;
 }
 
 async function startAgent() {
@@ -214,15 +461,19 @@ async function startAgent() {
   console.log('   🤖 JULES AVTONOM AGENTIGA XUSH KELIBSIZ');
   console.log('=========================================');
 
-  const apiKey = await getApiKey();
+  let config = await getApiKeyAndConfig();
   console.log('[Jules Agent] API kaliti qabul qilindi. Chat tizimi ishga tushmoqda...\n');
 
-  chatHistory.push({ role: 'system', content: SYSTEM_PROMPT });
+  if (config.endpoint.includes('jules.googleapis.com')) {
+     config = await initJulesSession(config);
+  } else {
+     chatHistory.push({ role: 'system', content: SYSTEM_PROMPT });
+  }
 
-  chatLoop(apiKey);
+  chatLoop(config);
 }
 
-function chatLoop(apiKey) {
+function chatLoop(config) {
   rl.question('\nSiz: ', async (userInput) => {
     if (userInput.toLowerCase() === 'exit' || userInput.toLowerCase() === 'quit') {
       console.log('[Jules Agent] Xayr! Dastur to\'xtatildi.');
@@ -231,23 +482,32 @@ function chatLoop(apiKey) {
     }
 
     if (!userInput.trim()) {
-      chatLoop(apiKey);
+      chatLoop(config);
       return;
     }
 
     chatHistory.push({ role: 'user', content: userInput });
 
-    await processAiResponse(apiKey);
+    await processAiResponse(config);
   });
 }
 
-async function processAiResponse(apiKey) {
+async function processAiResponse(config) {
   try {
     process.stdout.write('\nAgent o\'ylamoqda...');
-    const response = await callOpenAI(apiKey, chatHistory);
+
+    let response;
+    if (config.endpoint.includes('jules.googleapis.com')) {
+       const lastUserMsg = chatHistory[chatHistory.length - 1].content;
+       await sendMessage(config.apiKey, currentJulesSessionId, lastUserMsg);
+       response = await pollForAgentResponse(config.apiKey, currentJulesSessionId, knownActivityIds);
+    } else {
+       response = await callOpenAI(config.apiKey, chatHistory, config.endpoint, config.model);
+    }
+
     process.stdout.write('\r\x1b[K'); // clear the "thinking" line
 
-    console.log('\nJules:', response.replace(/\`\`\`json\n[\s\S]*?\n\`\`\`/g, '[JSON Action yashirildi]'));
+    console.log('\nJules:', (response || "").replace(/\`\`\`json\n[\s\S]*?\n\`\`\`/g, '[JSON Action yashirildi]'));
 
     chatHistory.push({ role: 'assistant', content: response });
 
@@ -258,17 +518,27 @@ async function processAiResponse(apiKey) {
 
       // Feed the result back to AI
       chatHistory.push({ role: 'user', content: `Harakat natijasi:\n\n${actionResult}\n\nNatijani tahlil qiling va agar kerak bo'lsa navbatdagi qadamni bajaring.` });
-      await processAiResponse(apiKey); // Recursive call for autonomous multi-step execution
+      await processAiResponse(config); // Recursive call for autonomous multi-step execution
     } else {
       // No more actions, back to user input
-      chatLoop(apiKey);
+      chatLoop(config);
     }
 
   } catch (error) {
     process.stdout.write('\r\x1b[K');
-    console.error('\n[Xatolik] API so\'rovida xatolik yuz berdi:', error.message);
-    chatHistory.pop(); // Remove the failed user prompt so they can try again
-    chatLoop(apiKey);
+    if (error.message === "401_UNAUTHORIZED") {
+      console.error('\n[Xatolik] API kaliti yaroqsiz (401 Unauthorized). U .env faylidan o\'chirilmoqda. Iltimos, dasturni qayta ishga tushiring va to\'g\'ri kalitni kiriting.');
+      if (fs.existsSync(envPath)) {
+        let envContent = fs.readFileSync(envPath, 'utf8');
+        envContent = envContent.replace(/^AI_API_KEY=.*$/m, '');
+        fs.writeFileSync(envPath, envContent, 'utf8');
+      }
+      process.exit(1);
+    } else {
+      console.error('\n[Xatolik] API so\'rovida xatolik yuz berdi:', error.message);
+      chatHistory.pop(); // Remove the failed user prompt so they can try again
+      chatLoop(config);
+    }
   }
 }
 
