@@ -79,8 +79,9 @@ pnpm install
 
 # Playwright o'rnatish
 log "Playwright va kerakli tizim paketlari o'rnatilmoqda..."
-npx -y playwright install chromium
-sudo npx -y playwright install-deps chromium
+export PLAYWRIGHT_BROWSERS_PATH="$PROJECT_ROOT/.playwright-browsers"
+pnpm --filter "./artifacts/api-server" exec playwright install chromium
+sudo -E env PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" pnpm --filter "./artifacts/api-server" exec playwright install-deps chromium
 
 # Build qilish
 log "Loyiha build qilinmoqda..."
